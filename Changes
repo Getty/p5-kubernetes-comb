@@ -1,4 +1,34 @@
 Revision history for Kubernetes-Comb
 
 {{$NEXT}}
- - Initial release.
+
+ - First release. A Comb is a self-contained "micro collection of
+   Kubernetes parts" that deploys itself, reports its status and publishes
+   its endpoints as a live Perl instance.
+ - Comb custom resource: Kubernetes::Comb::CRD::* classes for the CR, its
+   spec and status conditions; Kubernetes::Comb::CRD generates the IO::K8s
+   resource map for it; Kubernetes::Comb::Endpoint is the resolved-endpoint
+   value object.
+ - Client seam: Kubernetes::Comb::Role::Client defines the request surface
+   every Comb goes through; Kubernetes::Comb::Client::Sync (on
+   Kubernetes::REST) and Kubernetes::Comb::Client::Async (on
+   Net::Async::Kubernetes, an optional dependency) implement it, both
+   returning Futures.
+ - Comb lifecycle: from_crd builds an instance from a CR; deploy, status,
+   healthy, logs, restart, stop, describe and endpoint each return a Future
+   and never throw.
+ - reconcile resolves upstreams, checks dependencies and the contract
+   check, deploys and prunes only what the Comb owns, and writes status --
+   it never fails itself, turning any error into phase Error instead; a
+   status message never carries Perl's own " at FILE line N.".
+ - Upstreams and the bridge: Kubernetes::Comb::Role::Upstream,
+   Upstream::Static (fixed endpoints) and Upstream::K8s (a peer Comb in
+   another kube context) let a Comb borrow its service instead of running
+   it; a bridge stays on record until replaced, and a stopped Comb is
+   scaled back while its upstream is healthy.
+ - Kubernetes::Comb::Static and Role::Static load manifests from .pk8s and
+   YAML files, for a Comb with no code of its own.
+ - examples/sync.pl and examples/async.pl show what a manager driving
+   several Combs looks like, synchronously and on IO::Async.
+ - Unit tests (prove -lr t/) need no cluster; the integration suite only
+   runs with TEST_KUBERNETES_COMB_KUBECONFIG set.
