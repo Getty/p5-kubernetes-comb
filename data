@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-09-27T05:01:11Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T05:01:11Z
+created: 2026-09-27T04:25:36Z
+id: 2
+priority: high
+started: 2026-09-27T05:01:11Z
+status: done
+tags:
+- client
+- foundation
+title: 'Client seam: Client::Sync, Client::Async, fake client in t/lib'
+updated: 2026-09-27T05:01:11Z
+---
+
+SPEC §3, §4, §14 (decide whether a Kubernetes::Comb::Role::Client plus two classes is thin enough; propose in the report). Client::Sync wraps Kubernetes::REST: every method returns a Future, already done; an exception becomes a failed Future, never a die. Client::Async wraps Net::Async::Kubernetes, loads IO::Async/Net::Async::Kubernetes with require at runtime and dies naming the missing module. Surface = what the Comb needs: get, list (label selector), ensure, delete (Jobs need propagationPolicy Background or their pods orphan), update/patch, update_status, log (tailLines, previous, container), plus a way to learn the API server URL of the context (Upstream::K8s compares servers) and to build a client for another kube context. Net::Async::Kubernetes already has update_status/ensure/log; any real gap is a ticket for that board, no shim here. t/lib fake client with the same surface: records ensure/delete/update calls, returns canned pods/CRs/lists, can be told to fail a call. Done: unit tests for Sync and the fake itself; Async test skips cleanly without its optional deps.
+
+2026-09-27 04:40 Surface investigation: Kubernetes::REST 1.108 and NAK 0.009 delete() take no propagationPolicy (DELETE without DeleteOptions) -> real upstream gap, tickets needed on kubernetes-rest and p5-net-async-kubernetes boards. Errors of both are plain strings ('Kubernetes API error (ctx): <status> <body>'), no structured status -> no clean not-found distinction; also an upstream gap. NAK 0.009 (unreleased) is needed for ensure/update_status/patch_status.
+
+2026-09-27 04:53 Decision §14: yes to Kubernetes::Comb::Role::Client, as a pure interface role (requires only, no code): get list ensure delete update patch update_status patch_status log server_url for_context. Reason: the t/lib fake consumes it too, so surface drift fails at composition; gives the Comb's k8s attribute a type. Sync/Async are ~10 lines of delegation each (Future->call around Kubernetes::REST / Net::Async::Kubernetes). for_context is lazy: an unknown context fails the first request's Future (server_url croaks). patch_status added (merge patch, no resourceVersion conflicts) since both backends have it. Comb code should address its CR as '+'.crd_class: resolves without any resource map or discovery fetch.
+
+2026-09-27 04:53 Upstream tickets to file (dispatcher): [kubernetes-rest] delete() sends no DeleteOptions/propagationPolicy -> deleting a Job orphans its Pods (Comb restart/stop need Background). [p5-net-async-kubernetes] same for delete(). [kubernetes-rest + p5-net-async-kubernetes] API errors are plain croak strings, no structured HTTP status -> a Comb cannot tell 404 (already gone, e.g. prune) from other failures without regexing the message; proposal: exception object with status/code that stringifies as today, NAK failing with Future->fail(msg, 'kubernetes', status). Optional [p5-net-async-kubernetes]: configure() swallows the Kubeconfig error when context is given without kubeconfig (eval { $kc->api }), so 'Context not found' becomes 'server or kubeconfig required'; no 'with' providers, only a full resource_map. No shim for any of these here: delete has no propagationPolicy in our surface, errors pass through verbatim. recommends Net::Async::Kubernetes pinned 0.009 (ensure/update_status/patch_status are unreleased).
+
+2026-09-27 04:54 Done: lib/Kubernetes/Comb/Role/Client.pm (interface role), Client/Sync.pm, Client/Async.pm, t/lib/Kubernetes/Comb/Client/Fake.pm; t/client-sync.t (mock Kubernetes::REST io + kubeconfig fixture), t/client-async.t (skips without IO::Async/NAK), t/client-async-missing.t (hidden NAK -> clear message), t/client-fake.t; cpanfile: namespace::autoclean, Types::Standard, NAK recommends 0.009, test JSON::MaybeXS/Path::Tiny. Verified: prove -lr t/ green (unit mode, no cluster; async test ran with IO::Async + NAK 0.009 installed), also against released IO::K8s/Kubernetes::REST 1.108. Upstream gaps noted above (propagationPolicy, structured errors). Not committed.
+
+2026-09-27 05:01 Committed as 7c9fcf9 (Add the client seam: Role::Client, Client::Sync/Async and the test fake)
