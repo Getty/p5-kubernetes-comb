@@ -1,0 +1,29 @@
+---
+claimed_at: 2026-09-27T16:21:19Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T16:21:19Z
+created: 2026-09-27T04:26:18Z
+depends_on:
+- 5
+- 6
+- 7
+id: 9
+priority: medium
+started: 2026-09-27T16:21:19Z
+status: done
+tags:
+- pod
+title: POD pass over the public API
+updated: 2026-09-27T16:21:19Z
+---
+
+House format (=attr/=method/=seealso, # ABSTRACT). Kubernetes::Comb main POD: what a Comb is, the contract, the lifecycle, upstream resolution order, stubs, the "what a manager must do" section (SPEC §11), the API-group subclass recipe. Every public module documented.
+
+Wait for k11 and k12 (review fixes) before the POD pass: they change prune, loop and health behaviour.
+
+POD pass done, verified via dzil build + podchecker on the woven tree (0 errors). Ready for review.
+
+POD audit complete. Every public module in lib/ (17 files) already carried full [@Author::GETTY] house-format POD (=synopsis/=description/=attr/=method/=seealso, # ABSTRACT) from k1-k6/k11/k12 -- each worker kept it current with their code, including k12's reconcile/status/deploy/restart/stop fixes. Read every public .pm against SPEC.md and against the k1-k6/k11/k12 karr notes; found the docs accurate. Added to lib/Kubernetes/Comb.pm only: (1) a =head1 WHAT A MANAGER MUST DO section (SPEC section 11: watch/list CRs, from_crd with k8s/resolver/upstream/stub, depends_on topological order incl. cycle reporting, reconcile repeatedly, status/restart/stop/logs on request), pointing at examples/sync.pl and examples/async.pl -- this was the one section the card explicitly called out as missing; (2) SEE ALSO expanded to include Role::Upstream, Upstream::K8s, Upstream::Static and Static (previously just CRD::Comb, Role::Client, Endpoint); (3) the reconcile Conditions paragraph now names StatusWritten alongside Ready/DependenciesReady/ConfigReady; (4) the content-only-manifest-change behaviour (5a) now explicitly flagged as an open/undecided point, matching k12's note 'flag for the maintainer'. No code changed, no tests touched, examples/ untouched. Verification: plain podchecker on the raw source reports only Unknown-directive/unresolved-internal-link noise from the un-woven [\@Author::GETTY] shortcut syntax -- confirmed uniform across every file in lib/, edited or not, so not a real defect. Real check: dzil build --no-tgz then podchecker on the woven Kubernetes-Comb-0.001/lib tree (all 17 files) -- 15 clean, 2 (Client/Sync.pm, Client/Async.pm, both pre-existing/untouched) show only benign 'empty section' warnings from the intentional stacked bare =method heading pattern the card itself asked for; zero errors. SPEC drift found, not fixed (maintainer's call, per house rules): SPEC section 7 'Deploy details' labels list predates the comb-namespace label k11 added; section 7 5a prune text has no cluster-scoped exception; SPEC has no loop-detection text (max_upstream_depth was k5/k11); section 7 5a predates k12's healthy-Comb-deploys-when-record-differs refinement, the status.upstream/endpoints carry-forward through early-stop phases, and the refined Stopped semantics (only stop's own kinds count). These were already surfaced by the k11/k12 worker in their own notes; repeating here since this is the POD card. Proposed commit subject: 'Round out the main POD: what a manager must do, wider SEE ALSO, two open points (k9)'.
+
+2026-09-27 16:21 Committed as 7507fed: Round out the main POD: what a manager must do, wider SEE ALSO, two open points (k9). prove -lr t/ green, unit-only mode (TEST_KUBERNETES_COMB_KUBECONFIG unset).
