@@ -1,5 +1,6 @@
 requires 'Future';
 requires 'IO::K8s', '1.108';
+requires 'JSON::MaybeXS';
 requires 'Kubernetes::REST', '1.108';
 requires 'Module::Runtime';
 requires 'Moo';
@@ -11,7 +12,6 @@ recommends 'IO::Async';
 recommends 'Net::Async::Kubernetes', '0.009';
 
 on test => sub {
-  requires 'JSON::MaybeXS';
   requires 'Path::Tiny';
   requires 'Test::More';
 };
