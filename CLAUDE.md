@@ -8,9 +8,9 @@ publishes its endpoints, and can borrow its service from an upstream layer
 (`getty → dev → prod`) or be replaced by a stub.
 
 The full, approved design is in `SPEC.md` — read it before changing anything.
-Extracted and generalised from `HI::Comb` in `hi-proto`; this dist has **no HI
-specifics** (no namespace conventions, Vault/Royal, Skeid, fixed labels or API
-group).
+An open-source CPAN distribution: no site-specific policy (no namespace
+conventions, no secret-store integration, no fixed labels or API group) — all of
+that is configuration or a subclass.
 
 ## Build
 
@@ -48,3 +48,21 @@ read production env vars in tests.
 - `use Module;` to load; `require` only for genuine runtime plugin loading
   (optional async client, upstream/stub classes from the CR).
 - Default CR group `comb.internal/v1`, kind `Comb`, plural `combs`.
+
+## Delegation
+
+Delegate behavior-relevant code to the right agent instead of touching it yourself —
+principle and lane are in `.claude/rules/kubernetes-comb-rules.md`.
+
+| Task | Agent |
+|---|---|
+| Implement / refactor / debug behavior-relevant code | `kubernetes-comb-worker` (default) |
+| Write/extend tests, `t/lib/` fake client | `kubernetes-comb-test-writer` |
+| POD in the house format | `kubernetes-comb-pod-writer` |
+| Commits, packaging (`dist.ini`, `Changes`, `LICENSE`, CI), card → done, pre-release audit | `kubernetes-comb-release-manager` |
+
+The agents carry their skills via `briefing.skills` (see `.claude/agents/`); the main
+agent delegates rather than loading them. Architecture and invariants live in the
+project skill `.claude/skills/kubernetes-comb-core/`; the shared house skills are
+installed by skilletor from `.claude/skilletor.json` (gitignored build artifacts —
+change them in their source repo, never here).

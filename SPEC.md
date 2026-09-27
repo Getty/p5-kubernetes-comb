@@ -1,9 +1,6 @@
 # Kubernetes::Comb — Design Spec
 
 Status: approved design, not yet implemented (2026-09-26).
-Origin: extracted and generalised from the `HI::Comb` system in `hi-proto`.
-This dist does **not** aim to replace `HI::Comb` right away; it is a
-standalone, generic base that `hi-proto` may adopt later.
 
 ## 1. Idea
 
@@ -32,8 +29,8 @@ Goals:
   "on your own terms" by consuming resolved endpoints.
 - Layering (upstream) and stubs are first-class, but every piece of policy is
   overridable per Comb class or per controlling script.
-- No HI specifics: no namespace conventions, no Vault/Royal, no Skeid, no
-  fixed labels or API group.
+- No site-specific policy: no namespace conventions, no secret-store
+  integration, no fixed labels or API group.
 
 Non-goals (deliberately left open, must not be designed out):
 
@@ -101,7 +98,7 @@ Rules:
 - Core code uses plain `->then` chains, no `async sub`, so
   `Future::AsyncAwait` stays optional. User Comb classes may use it freely.
 - Missing features in `Net::Async::Kubernetes` (currently `update_status`,
-  `ensure`; and the client-cert issue mentioned in hi-proto) are fixed
+  `ensure`, client-cert verification) are fixed
   **upstream in Net::Async::Kubernetes**, never worked around in this dist.
 
 ## 5. Upstream (layering)
@@ -203,14 +200,12 @@ status:
 
 - Never any credentials in the CR.
 - A different API group: IO::K8s fixes `api_version` at `use` time, so a user
-  writes a three-line subclass of the CR class and passes it as `crd_class`
-  (hi-proto would do this with `hi.internal/v1`).
+  writes a three-line subclass of the CR class and passes it as `crd_class`.
 - The CustomResourceDefinition itself is produced by a method taking `group`
   as a parameter (returns an IO::K8s `CustomResourceDefinition` object), not
   shipped as a fixed YAML file.
-- Compared to hi-proto: `status.endpoints`, `spec.upstream`, `status.upstream`
-  are new; `vaultKeys` is gone (secrets belong to the class / `config`;
-  hi-proto re-adds Vault via its own subclass and the `check` hook).
+- Secrets are not part of the CR schema: they belong to the class / `config`.
+  A subclass that needs a secret store wires it in through the `check` hook.
 
 ## 7. Lifecycle: `reconcile`
 
@@ -251,7 +246,7 @@ the cluster address when both kube contexts point at the same API server,
 otherwise the `external` address. No reachable address → upstream counts as
 unreachable → `Blocked` with the reason.
 
-### Deploy details (carried over from hi-proto)
+### Deploy details
 
 - Every managed resource gets identifying labels (configurable prefix):
   the Comb name and `app.kubernetes.io/managed-by`.
