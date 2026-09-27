@@ -133,20 +133,92 @@ subtest 'an orphan that cannot be checked stays' => sub {
   like ready_message($status), qr/could not check Service old for pruning: connection reset/, 'reported';
 };
 
-subtest 'a cluster-scoped orphan' => sub {
-  my %role = ( apiVersion => 'rbac.authorization.k8s.io/v1', kind => 'ClusterRole', name => 'nats-reader' );
-  my ( $comb, $k8s ) = comb( {%role} );
-  $k8s->add( {
+subtest 'a cluster-scoped orphan is left in place' => sub {
+  my %role  = ( apiVersion => 'rbac.authorization.k8s.io/v1', kind => 'ClusterRole', name => 'nats-reader' );
+  my %space = ( apiVersion => 'v1', kind => 'Namespace', name => 'nats-extra' );
+  # a cluster-scoped manifest that named a namespace anyway
+  my %binding = ( apiVersion => 'rbac.authorization.k8s.io/v1', kind => 'ClusterRoleBinding',
+    namespace => 'platform', name => 'nats-reader' );
+  my ( $comb, $k8s ) = comb( {%role}, {%space}, {%binding} );
+  $k8s->add(
+    {
+      apiVersion => 'rbac.authorization.k8s.io/v1',
+      kind       => 'ClusterRole',
+      metadata   => { name => 'nats-reader', labels => {%labels} },
+      rules      => []
+    },
+    { apiVersion => 'v1', kind => 'Namespace', metadata => { name => 'nats-extra', labels => {%labels} } }
+  );
+  my $status = $comb->reconcile->get;
+  is $status->phase, 'Pending', 'Pending';
+  is_deeply deleted($k8s), [], 'nothing deleted';
+  ok $k8s->object( ClusterRole => 'nats-reader' ), 'the ClusterRole is still there';
+  ok $k8s->object( Namespace => 'nats-extra' ), 'the Namespace, with all in it, too';
+  ok !grep( { $_->[0] =~ /Cluster|Namespace/ } $k8s->calls_of('list') ), 'not even looked for';
+  is_deeply managed($status), [ {%deployment_nats} ], 'dropped from managedResources';
+  like ready_message($status), qr/left ClusterRole nats-reader in place: cluster-scoped, never pruned automatically/,
+    'reported: left in place';
+  like ready_message($status), qr/left Namespace nats-extra in place/, '... each of them';
+  like ready_message($status), qr/left ClusterRoleBinding nats-reader in place/, '... a recorded namespace changes nothing';
+};
+
+subtest 'a same-named Comb in another namespace keeps what it applied last' => sub {
+  # nats in getty and in dev, the layers in one cluster, both with a Service
+  # in namespace shared
+  my $k8s = Kubernetes::Comb::Client::Fake->new;
+  my %comb = map { $_ => TestComb::Configurable->new(
+    name      => 'nats',
+    namespace => $_,
+    k8s       => $k8s,
+    parts     => [ deployment('nats'), service( 'nats-shared', namespace => 'shared' ) ]
+  ) } qw( getty dev );
+  $comb{getty}->reconcile->get;
+  $comb{dev}->reconcile->get;
+  is_deeply $k8s->object( Service => 'nats-shared', namespace => 'shared' )->metadata->labels,
+    { comb_labels( 'nats', 'dev' ) }, 'dev applied it last: labelled as dev\'s';
+
+  $k8s->clear_calls;
+  $comb{getty}->parts( [ deployment('nats') ] );
+  my $status = $comb{getty}->reconcile->get;
+  is_deeply deleted($k8s), [], 'getty deletes nothing';
+  ok $k8s->object( Service => 'nats-shared', namespace => 'shared' ), 'dev\'s Service is still there';
+  like ready_message($status),
+    qr/left Service nats-shared alone: it no longer carries comb\.internal\/comb=nats,comb\.internal\/comb-namespace=getty/,
+    'reported: no longer getty\'s';
+  is_deeply managed($status), [ { %deployment_nats, namespace => 'getty' } ], 'dropped from getty\'s record';
+
+  $comb{dev}->parts( [ deployment('nats') ] );
+  $comb{dev}->reconcile->get;
+  is_deeply deleted($k8s), [ 'Service/nats-shared' ], 'the Comb that applied it last prunes it';
+};
+
+subtest 'layers in one cluster: a borrowing layer leaves the other\'s cluster-scoped parts' => sub {
+  my $k8s = Kubernetes::Comb::Client::Fake->new;
+  my %role = (
     apiVersion => 'rbac.authorization.k8s.io/v1',
     kind       => 'ClusterRole',
-    metadata   => { name => 'nats-reader', labels => {%labels} },
+    metadata   => { name => 'nats-reader' },
     rules      => []
-  } );
-  my $status = $comb->reconcile->get;
-  is_deeply deleted($k8s), [ 'ClusterRole/nats-reader' ], 'deleted';
-  my ( $list ) = grep { $_->[0] =~ /ClusterRole/ } $k8s->calls_of('list');
-  ok !{ @{$list}[ 1 .. $#$list ] }->{namespace}, 'looked for without a namespace';
-  is_deeply managed($status), [ {%deployment_nats} ], 'dropped';
+  );
+  my $answer = [];
+  my %comb = map { $_ => TestComb::Configurable->new(
+    name      => 'nats',
+    namespace => $_,
+    k8s       => $k8s,
+    parts     => [ service('nats'), {%role} ],
+    offers    => [ { name => 'client', port => 4222 } ],
+    ( $_ eq 'getty' ? ( upstream => sub { @$answer } ) : () )
+  ) } qw( dev getty );
+  $comb{$_}->reconcile->get for qw( dev getty );
+  is $comb{dev}->status->get->{phase}, 'Running', 'both deployed, dev Running';
+
+  # the developer's layer now borrows nats from dev
+  @$answer = ( Static => ( endpoints => [ { name => 'client', port => 4222, cluster => 'nats.dev.svc:4222' } ] ) );
+  my $status = $comb{getty}->reconcile->get;
+  is $status->phase, 'Running', 'getty borrows';
+  ok $k8s->object( ClusterRole => 'nats-reader' ), 'the ClusterRole dev still renders is still there';
+  like ready_message($status), qr/left ClusterRole nats-reader in place/, 'getty says so';
+  is $comb{dev}->status->get->{phase}, 'Running', 'dev stays Running';
 };
 
 subtest 'no pruning without a deploy' => sub {

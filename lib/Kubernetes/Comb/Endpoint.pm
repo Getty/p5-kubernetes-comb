@@ -3,6 +3,7 @@ package Kubernetes::Comb::Endpoint;
 our $VERSION = '0.001';
 
 use Moo;
+use Carp qw( croak );
 use Types::Standard qw( Int Str );
 use Kubernetes::Comb::CRD::CombEndpoint;
 use namespace::autoclean;
@@ -34,6 +35,8 @@ has name => ( is => 'ro', isa => Str, required => 1 );
 =attr name
 
 Required. The name the Comb class declares the endpoint under, e.g. C<client>.
+It names the port of the Service the bridge makes, so it must be a DNS-1123
+label (see L</name_problem>); construction dies on one that is not.
 
 =cut
 
@@ -68,6 +71,30 @@ has external => ( is => 'ro', isa => Str, predicate => 1 );
 
 Optional. Address from outside the cluster as C<host:port>; C<has_external>
 tells whether there is one.
+
+=cut
+
+sub BUILD {
+  my ( $self ) = @_;
+  my $problem = $self->name_problem( $self->name );
+  croak ref($self).': '.$problem if defined $problem;
+}
+
+sub name_problem {
+  my ( $self, $name ) = @_;
+  return if defined $name && length $name <= 63 && $name =~ /\A[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\z/;
+  return "the name '".( $name // '' )."' is not a DNS-1123 label (lowercase letters, digits and -, "
+    .'alphanumeric at both ends, at most 63 characters), as the name of a Service port must be';
+}
+
+=method name_problem
+
+  my $problem = Kubernetes::Comb::Endpoint->name_problem($name);
+
+Why C<$name> cannot be the name of an endpoint, or nothing when it can: it
+must be a DNS-1123 label -- lowercase letters, digits and C<->,
+alphanumeric at both ends, at most 63 characters -- because the bridge uses
+it as the name of a Service port. Works as class and as instance method.
 
 =cut
 

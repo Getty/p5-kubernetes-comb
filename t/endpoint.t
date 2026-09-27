@@ -17,6 +17,19 @@ subtest 'defaults and required attributes' => sub {
     'port is an integer';
 };
 
+subtest 'the name is a DNS-1123 label: a Service port name' => sub {
+  for my $name ( 'client', 'a', 'web-2', '2fa', 'x' x 63 ) {
+    ok eval { Kubernetes::Comb::Endpoint->new( name => $name, port => 1 ); 1 }, $name.' is fine' or diag $@;
+  }
+  for my $name ( 'Client', 'web_ui', 'web.ui', '-web', 'web-', 'x' x 64, '' ) {
+    ok !eval { Kubernetes::Comb::Endpoint->new( name => $name, port => 1 ); 1 }, '"'.$name.'" dies';
+    like $@, qr/\AKubernetes::Comb::Endpoint: the name '\Q$name\E' is not a DNS-1123 label/, '... naming it';
+  }
+  is( Kubernetes::Comb::Endpoint->name_problem('client'), undef, 'name_problem: none' );
+  like( Kubernetes::Comb::Endpoint->name_problem('Client'), qr/\Athe name 'Client' is not a DNS-1123 label/,
+    'name_problem: why' );
+};
+
 subtest 'to_crd and from_crd' => sub {
   my $ep = Kubernetes::Comb::Endpoint->new(
     name     => 'client',

@@ -6,6 +6,7 @@ requires 'Module::Runtime';
 requires 'Moo';
 requires 'namespace::autoclean';
 requires 'Path::Tiny';
+requires 'Types::Common::Numeric';
 requires 'Types::Standard';
 
 recommends 'Future::AsyncAwait';

@@ -42,6 +42,20 @@ use TestComb::Fixtures qw( comb_cr );
 }
 
 {
+  package TestComb::Loose;
+  use Moo;
+  extends 'Kubernetes::Comb';
+  sub endpoints { { name => 'http', port => 80 } }
+}
+
+{
+  # named like a stub of TestComb::Loose, but not one
+  package TestComb::Loose::Stub;
+  use Moo;
+  extends 'Kubernetes::Comb';
+}
+
+{
   package TestComb::Lonely;
   use Moo;
   extends 'Kubernetes::Comb';
@@ -155,11 +169,24 @@ subtest 'the stub contract is checked at construction' => sub {
   ok eval { TestComb::Mailer::Stub->new( stub_of => $original ); 1 }, 'the same endpoints pass';
   ok eval { TestComb::FakeQueue->new( stub_of => TestComb::Queue->new ); 1 },
     'more endpoints than the original pass';
+};
 
-  ok eval {
+subtest 'a Foo::Stub that is a Foo is checked however it was selected' => sub {
+  ok !eval {
     Kubernetes::Comb->from_crd( comb_cr( name => 'cache', class => 'TestComb::Cache::Stub' ) );
     1;
-  }, 'spec.class pointing at a stub builds it as an ordinary Comb';
+  }, 'spec.class naming the stub directly';
+  like $@, qr/TestComb::Cache::Stub does not keep the contract of TestComb::Cache: missing endpoint\(s\) metrics/,
+    'is checked against the class it is named after';
+
+  ok !eval { TestComb::Cache::Stub->new( namespace => 'platform' ); 1 }, 'plain construction too';
+  like $@, qr/missing endpoint\(s\) metrics/, 'naming the missing endpoint';
+
+  my $mailer = eval { Kubernetes::Comb->from_crd( comb_cr( name => 'mailer', class => 'TestComb::Mailer::Stub' ) ) };
+  isa_ok $mailer, 'TestComb::Mailer::Stub', 'a stub that keeps the contract' or diag $@;
+
+  ok eval { TestComb::Loose::Stub->new; 1 }, 'a ::Stub that is no subclass of its namesake is an ordinary Comb'
+    or diag $@;
 };
 
 done_testing;

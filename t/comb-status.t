@@ -99,7 +99,8 @@ subtest 'nothing deployed yet' => sub {
   is_deeply [ map { $_->[0] } $k8s->calls_of('list') ], [ 'apps/v1/Deployment', 'v1/Service' ],
     'one list per resource';
   is_deeply +{ @{ ( $k8s->calls_of('list') )[0] }[ 1 .. 4 ] },
-    { namespace => 'platform', labelSelector => 'comb.internal/comb=nats' }, 'by label, in the namespace';
+    { namespace => 'platform', labelSelector => 'comb.internal/comb=nats' },
+    'by the name label, in the namespace: a same-named Comb elsewhere may have applied a shared one last';
   ok !grep( { $_->[0] eq 'v1/Pod' } $k8s->calls_of('list') ), 'no pods asked for';
 };
 
@@ -155,7 +156,8 @@ subtest 'running' => sub {
   is $status->{pods}[1]{restarts}, 1, 'restarts counted';
   ok $status->{pods}[0]{ready}, 'ready';
   is_deeply +{ @{ ( grep { $_->[0] eq 'v1/Pod' } $k8s->calls_of('list') )[0] }[ 1 .. 4 ] },
-    { namespace => 'platform', labelSelector => 'comb.internal/comb=nats' }, 'pods by the Comb label';
+    { namespace => 'platform', labelSelector => 'comb.internal/comb=nats,comb.internal/comb-namespace=platform' },
+    'pods by the Comb labels';
 };
 
 subtest 'readiness means containers ready, not phase Running' => sub {

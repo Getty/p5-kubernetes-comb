@@ -274,29 +274,57 @@ subtest 'from upstream back to local' => sub {
   is reconciled($comb)->phase, 'Running', 'then Running';
 };
 
-subtest 'a loop: Blocked' => sub {
-  my @loop = ( endpoints => [ { name => 'client', port => 4222, cluster => 'nats.dev.example.com:4222' } ] );
-  my ( $comb, $k8s, $answer ) = comb( k8s => Kubernetes::Comb::Client::Fake->new( context => 'getty' ) );
-  is $comb->context, 'getty', 'the context comes from the client';
-  @$answer = ( Static => ( @loop, via => [ 'dev', 'getty', 'dev', 'getty' ] ) );
+subtest 'a chain longer than max_upstream_depth is a loop: Blocked' => sub {
+  my @client = ( endpoints => [ { name => 'client', port => 4222, cluster => 'nats.dev.example.com:4222' } ] );
+  my @layers = map { 'layer'.$_ } 1 .. 17;
+  my ( $comb, $k8s, $answer ) = comb();
+  is $comb->max_upstream_depth, 16, 'default 16';
+  @$answer = ( Static => ( @client, via => [ @layers[ 0 .. 15 ] ] ) );
+  is reconciled($comb)->phase, 'Running', '16 layers are a chain';
+
+  ( $comb, $k8s, $answer ) = comb();
+  @$answer = ( Static => ( @client, via => [@layers] ) );
   my $status = reconciled($comb);
   is_step( $status, Blocked => UpstreamLoop =>
-    qr/\Aupstream Kubernetes::Comb::Upstream::Static leads back to context getty: via dev, getty\z/, 'this context further up' );
-  is_deeply $status->upstream->via, [ 'dev', 'getty' ], 'via is cut there, so it does not grow';
+    qr/\Aupstream Kubernetes::Comb::Upstream::Static leads through more than 16 layers, a loop\? via layer1, layer2, .*, layer16\z/,
+    '17 layers' );
+  is_deeply $status->upstream->via, [ @layers[ 0 .. 15 ] ], 'via is cut to 16, so a loop does not grow it';
   is_deeply ensured($k8s), [], 'nothing applied';
   is_deeply published($status), [], 'no endpoints';
 
-  @$answer = ( Static => ( @loop, via => [ 'getty', 'prod' ] ) );
-  is reconciled($comb)->phase, 'Running', 'the first layer may be this context: another namespace';
+  ( $comb, $k8s, $answer ) = comb( max_upstream_depth => 2 );
+  @$answer = ( Static => ( @client, via => [ 'dev', 'dev' ] ) );
+  is reconciled($comb)->phase, 'Running', 'max_upstream_depth given: 2 layers are a chain';
+  @$answer = ( Static => ( @client, via => [ 'dev', 'dev', 'prod' ] ) );
+  $status = reconciled($comb);
+  is ready($status)->reason, 'UpstreamLoop', '... 3 are not';
+  is_deeply $status->upstream->via, [ 'dev', 'dev' ], '... cut to 2';
 
-  ( $comb, $k8s, $answer ) = comb( context => 'prod' );
-  @$answer = ( Static => ( @loop, via => [ 'dev', 'prod' ] ) );
-  is reconciled($comb)->phase, 'Blocked', 'context given to the Comb';
+  ok !eval { TestComb::Configurable->new( max_upstream_depth => 0 ); 1 }, 'at least one layer';
+};
 
-  ( $comb, $k8s, $answer ) = comb();
-  is $comb->context, undef, 'no context';
-  @$answer = ( Static => ( @loop, via => [ 'dev', 'getty', 'dev' ] ) );
-  is reconciled($comb)->phase, 'Running', '... no loop check';
+subtest 'one context, three namespaces: a chain, no loop' => sub {
+  # prod <- dev <- getty, all reached through the same kube context c -- the
+  # one the client itself was built for
+  my $k8s = Kubernetes::Comb::Client::Fake->new( context => 'c' );
+  $k8s->contexts->{c} = $k8s;
+  my %combs;
+  for my $namespace (qw( prod dev getty )) {
+    $k8s->add( comb_cr( name => 'nats', namespace => $namespace, class => 'TestComb::Configurable' ) );
+    $combs{$namespace} = TestComb::Configurable->new(
+      crd    => $k8s->object( Comb => 'nats', namespace => $namespace ),
+      k8s    => $k8s,
+      parts  => [ service('nats') ],
+      offers => [ { name => 'client', port => 4222 } ],
+      ( $namespace eq 'dev'   ? ( upstream => [ K8s => ( context => 'c', namespace => 'prod' ) ] ) : () ),
+      ( $namespace eq 'getty' ? ( upstream => [ K8s => ( context => 'c', namespace => 'dev' ) ] ) : () )
+    );
+  }
+  reconciled( $combs{$_} ) for qw( prod prod dev );
+  my $status = reconciled( $combs{getty} );
+  is_step( $status, Running => Borrowed => qr/\(context c\) via c, c\z/, 'getty borrows through dev from prod' );
+  is_deeply $status->upstream->via, [ 'c', 'c' ], 'via names the context of each layer';
+  is $combs{getty}->endpoint('client')->get->cluster, 'nats.prod.svc:4222', 'at prod\'s address';
 };
 
 subtest 'two layers borrowing from each other' => sub {
@@ -310,27 +338,30 @@ subtest 'two layers borrowing from each other' => sub {
     $k8s->add( comb_cr( name => 'nats', class => 'TestComb::Configurable',
       spec => { upstream => { class => $k8s_up, context => $other } } ) );
     $combs{$name} = TestComb::Configurable->new(
-      crd    => $k8s->object( Comb => 'nats', namespace => 'platform' ),
-      k8s    => $k8s,
-      offers => [ { name => 'client', port => 4222 } ]
+      crd                => $k8s->object( Comb => 'nats', namespace => 'platform' ),
+      k8s                => $k8s,
+      offers             => [ { name => 'client', port => 4222 } ],
+      max_upstream_depth => 3
     );
   }
   my @vias;
-  for ( 1 .. 3 ) {
+  for ( 1 .. 4 ) {
     for my $name (qw( dev prod )) {
       my $status = reconciled( $combs{$name} );
-      push @vias, $name.': '.$status->phase.' via '.join( ',', @{ $status->upstream->via } );
+      push @vias, $name.': '.ready($status)->reason.' via '.join( ',', @{ $status->upstream->via } );
     }
   }
   is_deeply \@vias, [
-    'dev: Blocked via prod',
-    'prod: Blocked via dev,prod',
-    'dev: Blocked via prod,dev',
-    'prod: Blocked via dev,prod',
-    'dev: Blocked via prod,dev',
-    'prod: Blocked via dev,prod'
-  ], 'both Blocked, via stays put';
-  is ready( $combs{prod}->recorded_status )->reason, 'UpstreamLoop', 'as a loop';
+    'dev: UpstreamEndpointsMissing via prod',
+    'prod: UpstreamEndpointsMissing via dev,prod',
+    'dev: UpstreamEndpointsMissing via prod,dev,prod',
+    'prod: UpstreamLoop via dev,prod,dev',
+    'dev: UpstreamLoop via prod,dev,prod',
+    'prod: UpstreamLoop via dev,prod,dev',
+    'dev: UpstreamLoop via prod,dev,prod',
+    'prod: UpstreamLoop via dev,prod,dev'
+  ], 'via grows to max_upstream_depth, then both are a loop and via stays put';
+  is $combs{$_}->recorded_status->phase, 'Blocked', $_.' Blocked' for qw( dev prod );
 };
 
 subtest 'replicate_into' => sub {

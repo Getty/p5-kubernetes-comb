@@ -37,6 +37,15 @@ use TestComb::Fixtures qw( comb_cr deployment );
   sub endpoints { }
 }
 
+# Not an upstream either, and counts how often it is built.
+{
+  package TestComb::NotAnUpstream;
+  our $BUILT = 0;
+  sub new       { $BUILT++; return bless {}, shift }
+  sub status    { }
+  sub endpoints { }
+}
+
 # A Comb class with an upstream method; what it answers is set per test.
 {
   package TestComb::WithUpstream;
@@ -185,6 +194,20 @@ subtest 'answers that do not resolve' => sub {
   fails_like( ( comb( upstream => sub { ( TestComb::Upstream::Probe->new ) x 2 } ) )[0],
     qr/one upstream object or hashref, not a list/, 'two objects' );
   fails_like( ( comb( upstream => sub { \'K8s' } ) )[0], qr/got a SCALAR reference/, 'something else' );
+};
+
+subtest 'a class is checked before it is built' => sub {
+  for my $case (
+    [ 'spec.upstream', spec => { upstream => { class => 'TestComb::NotAnUpstream', url => 'x' } } ],
+    [ 'a hashref',     upstream => { class => 'TestComb::NotAnUpstream', url => 'x' } ],
+    [ '+Full::Class',  upstream => sub { '+TestComb::NotAnUpstream' => ( url => 'x' ) } ]
+  ) {
+    my ( $what, @args ) = @$case;
+    local $TestComb::NotAnUpstream::BUILT = 0;
+    fails_like( ( comb( class => 'TestComb::Configurable', @args ) )[0],
+      qr/TestComb::NotAnUpstream does not do Kubernetes::Comb::Role::Upstream/, $what.': refused' );
+    is $TestComb::NotAnUpstream::BUILT, 0, $what.': never constructed';
+  }
 };
 
 subtest 'reconcile with an active upstream' => sub {

@@ -15,16 +15,18 @@ our @EXPORT_OK = qw( comb_cr comb_labels deployment pod service set_status );
 =head2 comb_labels
 
   my %labels = comb_labels('nats');
+  my %labels = comb_labels('nats', 'dev');
 
-The labels a Comb of that name puts on its resources, with the default
-prefix and managed-by value.
+The labels a Comb of that name in that namespace (default C<platform>) puts
+on its resources, with the default prefix and managed-by value.
 
 =cut
 
 sub comb_labels {
-  my ( $name ) = @_;
+  my ( $name, $namespace ) = @_;
   return (
     'comb.internal/comb'           => $name,
+    'comb.internal/comb-namespace' => $namespace // 'platform',
     'app.kubernetes.io/managed-by' => 'kubernetes-comb'
   );
 }
@@ -123,7 +125,7 @@ sub pod {
     metadata   => {
       name      => $name,
       namespace => $args{namespace} // 'platform',
-      labels    => { comb_labels( $args{comb} // 'nats' ) },
+      labels    => { comb_labels( $args{comb} // 'nats', $args{namespace} ) },
       ( $args{owner}
         ? ( ownerReferences => [ { apiVersion => 'apps/v1', kind => $args{owner}, name => 'owner', uid => 'u-1' } ] )
         : () )

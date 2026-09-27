@@ -13,6 +13,7 @@ use Module::Runtime qw( use_module use_package_optimistically );
 use POSIX qw( strftime );
 use Scalar::Util qw( blessed );
 use Socket qw( AF_INET AF_INET6 inet_ntop inet_pton );
+use Types::Common::Numeric qw( PositiveInt );
 use Types::Standard qw( ArrayRef CodeRef ConsumerOf HashRef InstanceOf Maybe Object Str );
 use Kubernetes::Comb::CRD;
 use Kubernetes::Comb::CRD::Comb;
@@ -220,8 +221,9 @@ has label_prefix => ( is => 'ro', isa => Str, default => 'comb.internal/' );
 =attr label_prefix
 
 Prefix of the label and annotation keys the Comb sets, default
-C<comb.internal/>: the name label is C<E<lt>prefixE<gt>comb>, the restart
-annotation C<E<lt>prefixE<gt>restartedAt>. Include the trailing C</>.
+C<comb.internal/>: the name label is C<E<lt>prefixE<gt>comb>, the namespace
+label C<E<lt>prefixE<gt>comb-namespace>, the restart annotation
+C<E<lt>prefixE<gt>restartedAt>. Include the trailing C</>.
 
 =cut
 
@@ -234,21 +236,15 @@ deploys. Default C<kubernetes-comb>.
 
 =cut
 
-has context => ( is => 'lazy', isa => Maybe[Str] );
+has max_upstream_depth => ( is => 'ro', isa => PositiveInt, default => 16 );
 
-sub _build_context {
-  my ( $self ) = @_;
-  my $k8s = $self->k8s;
-  return $k8s->can('context') ? $k8s->context : undef;
-}
+=attr max_upstream_depth
 
-=attr context
-
-The name of the kube context the Comb lives in, as the layers name it. Only
-used to spot an upstream chain that leads back here: an upstream whose
-C<via> names it beyond the first layer is a loop (see L</reconcile>).
-Defaults to the C<context> of L</k8s> when the client was given one, else
-C<undef> -- no loop check.
+The most layers an upstream chain may have, default 16. An upstream whose
+C<via> names more is taken for a loop -- C<Blocked>, see L</reconcile> --
+and its C<via> is recorded cut to this length, so a loop never makes it
+grow. Kube context names cannot tell a loop: layers may share one context
+(namespaces of one cluster), and kubeconfigs name contexts alike.
 
 =cut
 
@@ -294,6 +290,12 @@ The original Comb this instance stands in for, when it was built as its stub
 endpoint name of its original dies, naming the missing ones. C<is_stub> tells
 whether there is one.
 
+A class named C<Foo::Stub> that is a C<Foo> -- the default L</stub_class> of
+C<Foo> -- is checked against C<Foo> however it was selected: built without
+C<stub_of>, e.g. because C<spec.class> names it directly, it builds a C<Foo>
+from the same arguments to check against. That C<Foo> is not kept:
+C<stub_of> stays unset.
+
 =cut
 
 # The recorded status without a CR (with one it is crd->status).
@@ -304,17 +306,39 @@ has _memory_status => (
 );
 
 sub BUILD {
-  my ( $self ) = @_;
+  my ( $self, $args ) = @_;
   croak ref($self).': crd is a '.ref( $self->crd ).', not a '.$self->crd_class
     if $self->has_crd && $self->_has_crd_class && !$self->crd->isa( $self->crd_class );
-  $self->_check_stub_contract if $self->is_stub;
+  $self->_check_name;
+  my $original = $self->is_stub ? $self->stub_of : $self->_original_by_name($args);
+  $self->_check_stub_contract($original) if $original;
+}
+
+# The name is a label value on every resource of the Comb. A Comb that has
+# no name yet fails its operations instead, not its construction.
+sub _check_name {
+  my ( $self ) = @_;
+  my ( $name ) = eval { $self->name };
+  return unless defined $name;
+  croak ref($self).": the name '".$name."' cannot be a label value, and it is one on every resource"
+    .' (at most 63 characters: letters, digits, -, _ and ., alphanumeric at both ends)'
+    unless length $name <= 63 && $name =~ /\A[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?\z/;
+}
+
+# Foo::Stub that is a Foo stands in for a Foo, however it was selected: the
+# Foo built from the same arguments, to check the contract against.
+sub _original_by_name {
+  my ( $self, $args ) = @_;
+  my ( $original ) = ref($self) =~ /\A(.+)::Stub\z/;
+  return unless defined $original && $self->isa($original) && $original->isa(__PACKAGE__);
+  return $original->new(%$args);
 }
 
 sub _check_stub_contract {
-  my ( $self ) = @_;
+  my ( $self, $original ) = @_;
   my %own = map { $_ => 1 } $self->_endpoint_names;
-  my @missing = grep { !$own{$_} } $self->stub_of->_endpoint_names;
-  croak ref($self).' does not keep the contract of '.ref( $self->stub_of )
+  my @missing = grep { !$own{$_} } $original->_endpoint_names;
+  croak ref($self).' does not keep the contract of '.ref($original)
     .': missing endpoint(s) '.join( ', ', @missing ) if @missing;
 }
 
@@ -332,7 +356,10 @@ sub name {
 =method name
 
 The name of the Comb. Defaults to C<metadata.name> of L</crd>; a class used
-without a custom resource overrides it.
+without a custom resource overrides it. It goes into a label value on every
+resource, so construction dies on a name that cannot be one: more than 63
+characters, or other than letters, digits, C<->, C<_> and C<.> with a letter
+or digit at both ends.
 
 =cut
 
@@ -354,7 +381,9 @@ sub endpoints { return }
 =method endpoints
 
 List of what the Comb offers, each a hashref or a L<Kubernetes::Comb::Endpoint>.
-A hashref has C<name> and C<port>, optionally C<protocol> (default C<tcp>),
+A hashref has C<name> -- a DNS-1123 label, see
+L<Kubernetes::Comb::Endpoint/name_problem> -- and C<port>, optionally
+C<protocol> (default C<tcp>),
 C<service> (the Service it is reached through, default L</name>),
 C<external> and C<cluster> (both C<host:port>; C<cluster> defaults to
 C<E<lt>serviceE<gt>.E<lt>namespaceE<gt>.svc:E<lt>portE<gt>>). Default: none.
@@ -507,8 +536,9 @@ constructs it with C<< crd => $cr >> plus the options, all of which but
 C<stub> go to the constructor. C<stub> is called with that instance; when it
 returns true, the instance's L</stub_class> is built instead, with the
 original as L</stub_of> -- which checks the stub keeps the original's
-endpoints. Dies when C<spec.class> is not a subclass of the invocant, or a
-stub is asked for and there is none.
+endpoints. A C<spec.class> naming a stub directly is checked as well, see
+L</stub_of>. Dies when C<spec.class> is not a subclass of the invocant, a
+stub is asked for and there is none, or construction dies.
 
 =cut
 
@@ -532,10 +562,22 @@ Key of the label that carries the Comb name: C<E<lt>label_prefixE<gt>comb>.
 
 =cut
 
+sub comb_namespace_label { shift->label_prefix.'comb-namespace' }
+
+=method comb_namespace_label
+
+Key of the label that carries the Comb namespace:
+C<E<lt>label_prefixE<gt>comb-namespace>. Next to the name it tells the
+resources of same-named Combs in different namespaces apart -- the layers of
+one cluster -- where they share a namespace or are cluster-scoped.
+
+=cut
+
 sub comb_labels {
   my ( $self ) = @_;
   return {
     $self->comb_label              => $self->name,
+    $self->comb_namespace_label    => $self->namespace,
     'app.kubernetes.io/managed-by' => $self->managed_by
   };
 }
@@ -543,19 +585,21 @@ sub comb_labels {
 =method comb_labels
 
 Hashref of the labels every resource of the Comb gets, Pod templates of its
-workloads included: L</comb_label> with the name, and
-C<app.kubernetes.io/managed-by> with L</managed_by>.
+workloads included: L</comb_label> with the name, L</comb_namespace_label>
+with the L</namespace>, and C<app.kubernetes.io/managed-by> with
+L</managed_by>.
 
 =cut
 
 sub label_selector {
   my ( $self ) = @_;
-  return $self->comb_label.'='.$self->name;
+  return $self->comb_label.'='.$self->name.','.$self->comb_namespace_label.'='.$self->namespace;
 }
 
 =method label_selector
 
-Label selector for everything of this Comb, C<E<lt>comb_labelE<gt>=E<lt>nameE<gt>>.
+Label selector for everything of this Comb:
+C<E<lt>comb_labelE<gt>=E<lt>nameE<gt>,E<lt>comb_namespace_labelE<gt>=E<lt>namespaceE<gt>>.
 
 =cut
 
@@ -628,14 +672,19 @@ L</check> reports missing prerequisites: C<NeedsConfig>.
 =item 5a. Local
 
 Without an upstream. L</status> healthy: C<Running>. Otherwise L</deploy>,
-then prune: every resource this Comb recorded in C<managedResources> that it
-no longer renders -- compared by group, kind, namespace and name, so a new
-API version is no orphan -- is deleted if it still carries
-L</label_selector>. One that lost the label is left alone and dropped from
-the record, one that is gone is dropped, one that fails to delete stays for
-the next step. Then C<Pending>. A deploy that fails half-way is an C<Error>
-that records what it applied on top of the previous record, and prunes
-nothing. A reconcile after L</stop> deploys again, which scales the
+then prune: every namespaced resource this Comb recorded in
+C<managedResources> that it no longer renders -- compared by group, kind,
+namespace and name, so a new API version is no orphan -- is deleted if it
+still carries L</label_selector>, name and namespace of this Comb. One that
+does not -- it lost the labels, or a same-named Comb of another namespace
+applied it last -- is left alone and dropped from the record, one that is
+gone is dropped, one that fails to delete stays for the next step. A
+cluster-scoped one is never deleted: a Namespace or a
+CustomResourceDefinition takes far more with it, and a same-named Comb of
+another namespace may render it too. It is dropped from the record and left
+in place, which the C<Ready> message says. Then C<Pending>. A deploy that
+fails half-way is an C<Error> that records what it applied on top of the
+previous record, and prunes nothing. A reconcile after L</stop> deploys again, which scales the
 workloads back up. The first step after borrowing from an upstream deploys
 even when L</status> looks healthy, since the bridge may stand where the
 local resources belong.
@@ -648,8 +697,8 @@ runs nothing of its own and borrows the service instead:
 =over
 
 =item * The upstream's C<status>. Not reachable: C<Blocked> with its
-message. A C<via> that names L</context> beyond the first layer is a loop:
-C<Blocked>, the recorded C<via> cut after that entry.
+message. A C<via> of more than L</max_upstream_depth> layers is taken for a
+loop: C<Blocked> (C<UpstreamLoop>), the recorded C<via> cut to that length.
 
 =item * The upstream's C<endpoints>, matched by name to L</endpoints>: each
 declared endpoint gets the upstream's C<cluster> address (else its
@@ -737,9 +786,12 @@ Future of what the cluster shows of the Comb right now:
     pods    => [ { name, phase, ready, restarts, reason, message }, ... ]
   }
 
-It looks for every rendered resource (by L</label_selector>) and at the Pods
-of the Comb. C<NotDeployed>: none of the resources exists. C<Stopped>: the
-workloads are scaled to zero or suspended, as L</stop> leaves them.
+It looks for every rendered resource (by L</comb_label> alone: where a
+same-named Comb of another namespace renders the same resource, the one that
+applied it last owns it, and both find it) and at the Pods of the Comb (by
+L</label_selector>). C<NotDeployed>: none of the resources exists.
+C<Stopped>: the workloads are scaled to zero or suspended, as L</stop> leaves
+them.
 C<Running>: every resource exists, every Pod that should run has all its
 containers ready, the replicated workloads have their ready replicas and the
 Jobs completed. A Comb without workloads is running once its resources
@@ -1097,9 +1149,12 @@ sub _fetch_live {
     my $resource = $_;
     map {
       my ( $namespace, $members ) = ( $_, $groups{$resource}{$_} );
+      # By the name label alone: a same-named Comb of another namespace that
+      # renders the same resource may have applied it last, and requiring
+      # the namespace label here would make both deploy it every step.
       $self->k8s->list( $resource,
         ( length $namespace ? ( namespace => $namespace ) : () ),
-        labelSelector => $self->label_selector
+        labelSelector => $self->comb_label.'='.$self->name
       )->then( sub {
         my %live = map { ( $_->metadata->name => $_ ) } @{ $_[0]->items // [] };
         $_->{live} = $live{ $_->{name} } for @$members;
@@ -1413,6 +1468,8 @@ sub _declared_endpoints {
     }
     croak ref($self).'->endpoints: an endpoint has no name'
       unless defined $declared{name} && length $declared{name};
+    my $problem = $self->endpoint_class->name_problem( $declared{name} );
+    croak ref($self).'->endpoints: '.$problem if defined $problem;
     croak ref($self).'->endpoints: endpoint '.$declared{name}.' is declared twice'
       if $seen{ $declared{name} }++;
     push @declared, \%declared;
@@ -1450,19 +1507,18 @@ sub _observe_upstream {
       my $via = $seen->{via} // [];
       return $stop->( Error => UpstreamFailed => ref($upstream).'->status answered a via that is no arrayref' )
         unless ref $via eq 'ARRAY';
-      # Beyond the first layer -- which may well be this context, another
-      # namespace -- this context means the chain came back here. Cut there,
-      # so a loop records the same via every step instead of a growing one.
+      # A chain longer than that is taken for a loop, recorded cut to that
+      # length: a loop then records the same via every step, not a growing one.
       my @via = @$via;
-      my $own = $self->context;
-      my ( $back ) = defined $own ? grep { defined $via[$_] && $via[$_] eq $own } 1 .. $#via : ();
-      splice @via, $back + 1 if defined $back;
+      my $max = $self->max_upstream_depth;
+      my $loop = @via > $max;
+      splice @via, $max if $loop;
       $o{via} = \@via;
       my $label = $self->_upstream_label( \%o );
       return $stop->( Blocked => UpstreamUnreachable => $label.' is unreachable'.$self->_upstream_says( $seen, ': ' ) )
         unless $seen->{reachable};
-      return $stop->( Blocked => UpstreamLoop => $label.' leads back to context '.$own.': via '.join( ', ', @via ) )
-        if defined $back;
+      return $stop->( Blocked => UpstreamLoop => $label.' leads through more than '.$max.' layers, a loop? via '
+        .join( ', ', @via ) ) if $loop;
       return $self->_hook( sub { $upstream->endpoints( $_[0] ) } )->else( sub {
         $stop->( Error => UpstreamFailed => 'reading the endpoints of '.$label.' failed: '.$self->_message( $_[0] ) );
       } );
@@ -1971,15 +2027,26 @@ sub _union {
   return \@union;
 }
 
-# Future of { resource, keep, note } per orphan; never fails. An orphan that
-# still carries the Comb label is deleted. One that does not is gone or no
-# longer this Comb's -- not ours to delete either way. A failed check or
-# delete keeps it for the next step.
+# Future of { resource, keep, note } per orphan; never fails. A
+# cluster-scoped orphan is left in place. An orphan that still carries the
+# Comb labels is deleted. One that does not is gone or no longer this Comb's
+# -- not ours to delete either way. A failed check or delete keeps it for the
+# next step.
 sub _prune {
   my ( $self, @orphans ) = @_;
-  return Future->done unless @orphans;
-  my %groups;
-  push @{ $groups{ $_->{apiVersion}.'/'.$_->{kind} }{ $_->{namespace} // '' } }, $_ for @orphans;
+  my ( @left, %groups );
+  for my $orphan (@orphans) {
+    if ( $self->_cluster_scoped($orphan) ) {
+      push @left, {
+        resource => $orphan,
+        keep     => 0,
+        note     => 'left '.$orphan->{kind}.' '.$orphan->{name}.' in place: cluster-scoped, never pruned automatically'
+      };
+      next;
+    }
+    push @{ $groups{ $orphan->{apiVersion}.'/'.$orphan->{kind} }{ $orphan->{namespace} // '' } }, $orphan;
+  }
+  return Future->done(@left) unless %groups;
   return Future->needs_all( map {
     my $resource = $_;
     map {
@@ -2002,7 +2069,17 @@ sub _prune {
         }
       );
     } sort keys %{ $groups{$resource} };
-  } sort keys %groups );
+  } sort keys %groups )->then( sub { Future->done( @left, @_ ) } );
+}
+
+# Cluster-scoped: a Namespace takes everything in it along, a
+# CustomResourceDefinition every object of its kind, and a same-named Comb of
+# another namespace may render it too. Recorded without a namespace means it
+# was applied as one.
+sub _cluster_scoped {
+  my ( $self, $resource ) = @_;
+  return 1 unless defined $resource->{namespace};
+  return $self->_namespaced( undef, $resource ) ? 0 : 1;
 }
 
 sub _prune_one {
@@ -2083,9 +2160,13 @@ sub _upstream_class {
   return $name =~ /\A\+(.+)\z/ ? $1 : 'Kubernetes::Comb::Upstream::'.$name;
 }
 
+# Checked before it is built: a class the custom resource names gets no
+# constructor call unless it is an upstream.
 sub _build_upstream {
   my ( $self, $source, $class, @args ) = @_;
   use_module($class) unless $class->can('new');
+  croak $source.': '.$class.' does not do '.$self->_upstream_role
+    unless $class->DOES( $self->_upstream_role );
   return $self->_checked_upstream( $source, $class->new(@args) );
 }
 

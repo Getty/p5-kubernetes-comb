@@ -35,6 +35,22 @@ use TestComb::Fixtures qw( comb_cr );
   sub api_version { 'comb.example.com/v1' }
 }
 
+{
+  package TestComb::Called;
+  use Moo;
+  extends 'Kubernetes::Comb';
+  has given => ( is => 'ro' );
+  sub name { $_[0]->given }
+}
+
+{
+  package TestComb::BadPort;
+  use Moo;
+  extends 'Kubernetes::Comb';
+  sub name      { 'badport' }
+  sub endpoints { { name => 'client', port => 4222 }, { name => 'Web_UI', port => 80 } }
+}
+
 my $fake = Kubernetes::Comb::Client::Fake->new;
 
 subtest 'defaults without a custom resource' => sub {
@@ -55,11 +71,14 @@ subtest 'defaults without a custom resource' => sub {
   is $comb->label_prefix, 'comb.internal/', 'default label prefix';
   is $comb->comb_label, 'comb.internal/comb', 'name label key';
   is $comb->restart_annotation, 'comb.internal/restartedAt', 'restart annotation key';
+  is $comb->comb_namespace_label, 'comb.internal/comb-namespace', 'owner namespace label key';
   is_deeply $comb->comb_labels, {
     'comb.internal/comb'           => 'named',
+    'comb.internal/comb-namespace' => 'platform',
     'app.kubernetes.io/managed-by' => 'kubernetes-comb'
   }, 'identifying labels';
-  is $comb->label_selector, 'comb.internal/comb=named', 'label selector';
+  is $comb->label_selector, 'comb.internal/comb=named,comb.internal/comb-namespace=platform',
+    'label selector: name and namespace';
   isa_ok $comb->io_k8s, 'IO::K8s';
 };
 
@@ -98,6 +117,7 @@ subtest 'custom label prefix and managed-by' => sub {
   );
   is_deeply $comb->comb_labels, {
     'example.com/comb'             => 'named',
+    'example.com/comb-namespace'   => 'platform',
     'app.kubernetes.io/managed-by' => 'my-manager'
   }, 'labels follow the configuration';
   is $comb->restart_annotation, 'example.com/restartedAt', 'annotation too';
@@ -130,6 +150,31 @@ subtest 'missing name and namespace fail the operations, not construction' => su
   ok $d->is_done, 'nothing to deploy needs no namespace';
   like( TestComb::Named->new( k8s => $fake )->describe->failure, qr/TestComb::Named has no namespace/,
     'describe names the missing namespace' );
+};
+
+subtest 'the name must be a label value' => sub {
+  for my $name ( 'nats', 'a', 'Nats_2.b-c', 'x' x 63 ) {
+    ok eval { TestComb::Called->new( given => $name ); 1 }, $name.' is fine' or diag $@;
+  }
+  for my $name ( 'x' x 64, 'nats!', '-nats', 'nats.', 'na ts' ) {
+    ok !eval { TestComb::Called->new( given => $name ); 1 }, $name.' dies at construction';
+    like $@, qr/\ATestComb::Called: the name '\Q$name\E' cannot be a label value/, '... naming it';
+  }
+  my $cr = comb_cr( name => 'n' x 64, class => 'TestComb::Plain' );
+  ok !eval { Kubernetes::Comb->from_crd($cr); 1 }, 'a custom resource with a longer name';
+  like $@, qr/the name 'n{64}' cannot be a label value/, '... is refused';
+  ok eval { TestComb::Called->new; 1 }, 'no name yet: the operations fail, not construction';
+};
+
+subtest 'endpoint names are DNS-1123 labels' => sub {
+  my $comb = TestComb::BadPort->new( namespace => 'platform', k8s => Kubernetes::Comb::Client::Fake->new );
+  my $f = $comb->endpoint('client');
+  ok $f->is_failed, 'a declaration with an invalid name fails the endpoints';
+  like $f->failure, qr/TestComb::BadPort->endpoints: the name 'Web_UI' is not a DNS-1123 label/, '... naming it';
+  my $status = $comb->reconcile->get;
+  is $status->phase, 'Error', 'reconcile: Error';
+  my ( $ready ) = grep { $_->type eq 'Ready' } @{ $status->conditions };
+  like $ready->message, qr/'Web_UI' is not a DNS-1123 label/, '... saying why';
 };
 
 subtest 'the upstream argument' => sub {
