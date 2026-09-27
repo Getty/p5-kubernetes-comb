@@ -522,6 +522,7 @@ subtest 'Upstream::K8s in a reconcile' => sub {
   is_step( $status, Blocked => UpstreamUnreachable =>
     qr/\Aupstream Kubernetes::Comb::Upstream::K8s \(context dev\) is unreachable: reading Comb platform\/nats in context dev failed: Context not found: dev/,
     'a missing context' );
+  like ready($status)->message, qr/Context not found: dev\z/, '... ending with the error, not where it was raised';
   is $status->upstream->context, 'dev', 'status.upstream.context';
   is_deeply $status->upstream->via, [ 'dev' ], 'status.upstream.via';
 

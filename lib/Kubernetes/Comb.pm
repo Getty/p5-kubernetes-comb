@@ -1748,11 +1748,12 @@ sub _upstream_label {
   return 'upstream '.ref( $o->{upstream} ).( defined $context ? ' (context '.$context.')' : '' );
 }
 
-# The message of the upstream status, behind $glue; else nothing.
+# The message of the upstream status, as status text behind $glue; else
+# nothing.
 sub _upstream_says {
   my ( $self, $seen, $glue ) = @_;
-  my $message = $seen ? $seen->{message} : undef;
-  return defined $message && length $message ? $glue.$message : '';
+  my $message = $seen && defined $seen->{message} ? $self->_message( $seen->{message} ) : '';
+  return length $message ? $glue.$message : '';
 }
 
 # Phase, reason and message of a bridge that is in place: Running when the
@@ -1941,9 +1942,14 @@ sub _condition {
   return;
 }
 
+# An error as status text: without the trailing whitespace, and without the
+# " at FILE line N." -- or "..., <FH> line N." -- that die and croak append
+# when the text has no newline of its own.
 sub _message {
   my ( $self, $error ) = @_;
-  return defined $error ? ( ''.$error ) =~ s/\s+\z//r : 'unknown error';
+  return 'unknown error' unless defined $error;
+  return ( ''.$error ) =~ s/\s+\z//r
+    =~ s/\s+at (?:\(eval \d+\)|\S+) line \d+(?:, <[^>]*> (?:line|chunk) \d+)?\.\z//r;
 }
 
 # Step 1, then on.

@@ -3,6 +3,7 @@ use warnings;
 use Test::More;
 
 use lib 't/lib';
+use Carp qw( croak );
 use Future;
 use Kubernetes::Comb;
 use Kubernetes::Comb::Client::Fake;
@@ -365,6 +366,26 @@ subtest 'Error' => sub {
   $status = reconciled($comb);
   is $status->phase, 'Error', 'endpoints that do not resolve: Error';
   is condition( $status, 'Ready' )->reason, 'EndpointsFailed', '... EndpointsFailed';
+};
+
+subtest 'an error text loses where Perl raised it' => sub {
+  open my $fh, '<', \"one line\n" or die $!;
+  my %dying = (
+    'die'                => [ sub { die 'vault sealed' },                                   ' at FILE line N.' ],
+    'croak'              => [ sub { croak('vault sealed') },                                ' at FILE line N.' ],
+    'die after reading'  => [ sub { my $line = <$fh>; die 'vault sealed' },                 ', <$fh> line 1.' ],
+    'die in string eval' => [ sub { eval q{die 'vault sealed'}; die $@ },                   ' at (eval N) line 1, <$fh> line 1.' ],
+    'failed Future'      => [ sub { Future->fail("vault sealed at lib/Vault.pm line 7.\n") }, ' at FILE line N.' ]
+  );
+  for my $what ( sort keys %dying ) {
+    my ( $hook, $suffix ) = @{ $dying{$what} };
+    my ( $comb ) = comb( missing => $hook );
+    my $status = reconciled($comb);
+    is condition( $status, 'Ready' )->message, 'check failed: vault sealed',
+      $what.': Ready without "'.$suffix.'"';
+    is condition( $status, 'ConfigReady' )->message, 'check failed: vault sealed',
+      $what.': ConfigReady too';
+  }
 };
 
 subtest 'deploy failing half-way' => sub {
