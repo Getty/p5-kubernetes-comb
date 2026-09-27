@@ -73,6 +73,38 @@ fails at all.
 
 =cut
 
+=head1 WHAT A MANAGER MUST DO
+
+Kubernetes::Comb ships no manager or daemon: whoever drives Combs does it from
+their own program, sync or async, with one step repeated:
+
+=over
+
+=item 1. Watch or list C<Comb> custom resources.
+
+=item 2. Build an instance for each with L</from_crd>, passing C<k8s>,
+C<resolver>, C<upstream> and C<stub> as the layering and stub choices call
+for.
+
+=item 3. Order the instances by L</depends_on> (topological sort; a cycle is
+not an exception -- report it, and reconcile its Combs anyway: each stays
+C<Blocked> on the other, and says so).
+
+=item 4. Call L</reconcile> on each, repeatedly (a timer, on a CR change, or
+both).
+
+=item 5. Show or act on L</status>; call L</restart>, L</stop>, L</logs> on
+request.
+
+=back
+
+F<examples/sync.pl> and F<examples/async.pl> do exactly this for three
+Combs -- C<nats> local, C<db> replicated (L<Kubernetes::Comb::Upstream::Static>
+or L<Kubernetes::Comb::Upstream::K8s>), C<mailer> as a stub -- and print every
+state transition; run either with C<--help>.
+
+=cut
+
 # group/Kind of the workloads, each with the paths below the object where it
 # keeps the templates of what it creates. The Comb labels go there too, so
 # the Pods (and a CronJob's Jobs) carry them. [] would be the object itself,
@@ -704,7 +736,10 @@ never recorded: deploy and prune all the same, and stay C<Running>, the
 C<Ready> message saying so. Everything the manifests render was live and
 healthy before. Only the set of resources is compared: a manifest whose
 content changed (a new image) is applied when the Comb is not healthy or
-its record differs, not because of that change.
+its record differs, not because of that change. Whether it should force a
+re-apply too is open -- undecided design, not a bug -- and would need a way
+to detect it (an applied-digest annotation or status field, or deploying
+every step).
 
 A workload scaled below its manifest counts as not healthy (see
 L</status>), so a reconcile after L</stop>, or after scaling a Deployment
@@ -770,9 +805,11 @@ for each.
 =back
 
 Conditions: C<Ready> (C<True> when C<Running>; its reason and message are
-the step's), C<DependenciesReady> and C<ConfigReady>, each C<Unknown> with
-reason C<NotChecked> when the step did not get that far. Their
-C<lastTransitionTime> changes only when their status does.
+the step's), C<DependenciesReady> and C<ConfigReady> (each C<Unknown> with
+reason C<NotChecked> when the step did not get that far), and
+C<StatusWritten> -- present only when writing the status failed (see step
+6), C<False> with the reason. Their C<lastTransitionTime> changes only when
+their status does.
 
 =cut
 
@@ -2474,6 +2511,11 @@ sub _now { strftime( '%Y-%m-%dT%H:%M:%SZ', gmtime ) }
 =item * L<Kubernetes::Comb::Role::Client> -- the client surface
 
 =item * L<Kubernetes::Comb::Endpoint>
+
+=item * L<Kubernetes::Comb::Role::Upstream>, L<Kubernetes::Comb::Upstream::K8s>,
+L<Kubernetes::Comb::Upstream::Static> -- layering
+
+=item * L<Kubernetes::Comb::Static> -- a Comb whose manifests are files
 
 =back
 
