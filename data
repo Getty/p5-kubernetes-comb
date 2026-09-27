@@ -1,0 +1,26 @@
+---
+claimed_at: 2026-09-27T16:26:59Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T16:26:59Z
+created: 2026-09-27T16:12:16Z
+id: 13
+priority: low
+started: 2026-09-27T16:26:59Z
+status: done
+tags:
+- core
+- status
+title: Status messages carry Carp's ' at FILE line N.' suffix
+updated: 2026-09-27T16:26:59Z
+---
+
+Found by k7: errors that come from croak/die end up verbatim in condition messages, e.g. the Ready condition says "...Context not found: dev at lib/Kubernetes/Comb/Upstream/K8s.pm line 172." Status is user-facing (kubectl get combs -o yaml); strip the trailing " at FILE line N." (and a trailing newline) where an exception text becomes a condition message or reason, in one place. Keep the full text available for logs if there is a place for it. Regression test. Do after k9 (POD writer is editing lib/ POD).
+
+2026-09-27 16:24 Cause: Comb.pm _message (the helper every exception->status text goes through) only trims trailing whitespace; the upstream's own status message reaches the Ready condition untouched via _upstream_says. Reproduced: Ready = '...Context not found: dev at lib/Kubernetes/Comb/Upstream/K8s.pm line 172.' and 'check failed: vault sealed at -e line 4.'. Plan: _message strips the Carp/die suffix; _upstream_says runs the upstream's message through _message too (covers every upstream class, not only K8s).
+
+2026-09-27 16:25 Also found (not changed, outside the status path): (1) logs() builds '(no log: ...)' with its own inline trim (Comb.pm ~l.1529), so a log read that croaks still shows ' at FILE line N.' there; could go through _message. (2) Upstream::K8s::_observe (l.179) keeps a private copy of the old _message (whitespace only), so its own status/endpoints answer still carries the suffix for a direct caller; the Comb now cleans it where it becomes status, for any upstream class. (3) deploy()'s failure text 'ensure KIND NAME: <error>' is raw for a direct caller; its status path is cleaned. (4) No log channel exists in the dist, so there is no place to keep the full text beyond what the failing call itself returns.
+
+2026-09-27 16:25 Done: Comb.pm _message, the one helper every error text goes through on its way into status, now also strips the ' at FILE line N.' / ', <FH> line N.' (also '(eval N)') suffix die and croak append; _upstream_says runs the upstream's own status message through it too, which is the path of the reported 'Context not found: dev at .../Upstream/K8s.pm line 172.'. Server text from Kubernetes::REST is untouched apart from that suffix. Tests: t/reconcile.t new subtest (check hook via die, croak, die after reading a handle, string eval, failed Future: Ready and ConfigReady are exactly 'check failed: vault sealed'), t/reconcile-borrow.t Upstream::K8s missing context: Ready ends with 'Context not found: dev'. Red before (10 + 1 failures), green after. prove -lr t/: 22 files, 214 tests, PASS, unit mode (integration skipped, env unset).
+
+2026-09-27 16:26 Committed b9e3ed1: Comb.pm _message strips die/croak's " at FILE line N." suffix; _upstream_says routes through it too. prove -lr t/: 22 files, 214 tests, PASS, unit mode (integration skipped, env unset).
