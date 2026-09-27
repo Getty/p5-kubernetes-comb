@@ -146,6 +146,85 @@ subtest 'a reconcile after stop deploys again' => sub {
     'the manifest brought the replicas back';
 };
 
+my $daemonset = {
+  apiVersion => 'apps/v1',
+  kind       => 'DaemonSet',
+  metadata   => { name => 'agent' },
+  spec       => {
+    selector => { matchLabels => { app => 'agent' } },
+    template => { metadata => { labels => { app => 'agent' } }, spec => { containers => [ { name => 'a', image => 'img' } ] } }
+  }
+};
+
+subtest 'a reconcile after stop deploys again, with a DaemonSet stop leaves running' => sub {
+  my ( $comb, $k8s ) = comb( parts => [ deployment('nats'), $daemonset ] );
+  reconciled($comb);
+  set_status( $k8s, Deployment => 'nats', { replicas => 1, readyReplicas => 1 } );
+  set_status( $k8s, DaemonSet => 'agent', { desiredNumberScheduled => 1, numberReady => 1,
+    currentNumberScheduled => 1, numberMisscheduled => 0 } );
+  is reconciled($comb)->phase, 'Running', 'running';
+  $comb->stop->get;
+  set_status( $k8s, Deployment => 'nats', { replicas => 0 } );
+  $k8s->clear_calls;
+
+  my $status = reconciled($comb);
+  is $status->phase, 'Pending', 'the next step deploys: Pending';
+  like condition( $status, 'Ready' )->message, qr/not healthy yet \(stopped\)/, '... because it was stopped';
+  is_deeply [ map { $_->[0]{kind} } $k8s->calls_of('ensure') ], [qw( Deployment DaemonSet )], 'applied';
+  isnt $k8s->object( Deployment => 'nats', namespace => 'platform' )->spec->replicas // 1, 0,
+    'the manifest brought the replicas back';
+};
+
+subtest 'a Deployment scaled to 0 by hand is scaled back' => sub {
+  my ( $comb, $k8s ) = comb( parts => [ deployment('nats'), deployment('nats-web') ] );
+  reconciled($comb);
+  set_status( $k8s, Deployment => $_, { replicas => 1, readyReplicas => 1 } ) for qw( nats nats-web );
+  is reconciled($comb)->phase, 'Running', 'running';
+  $k8s->patch( 'Deployment', 'nats-web', namespace => 'platform', patch => { spec => { replicas => 0 } } )->get;
+  set_status( $k8s, Deployment => 'nats-web', { replicas => 0 } );
+  $k8s->clear_calls;
+
+  my $status = reconciled($comb);
+  is $status->phase, 'Pending', 'short of replicas: deployed, Pending';
+  like condition( $status, 'Ready' )->message, qr/Deployment nats-web: 0 of 1 ready \(scaled to 0\)/, '... saying why';
+  is scalar $k8s->calls_of('ensure'), 2, 'applied';
+  isnt $k8s->object( Deployment => 'nats-web', namespace => 'platform' )->spec->replicas // 1, 0,
+    'scaled back';
+};
+
+subtest 'a manifest at 0 replicas: Running at 0, no deploy every step' => sub {
+  my $resting = deployment('nats');
+  $resting->{spec}{replicas} = 0;
+  my ( $comb, $k8s ) = comb( parts => [ $resting ] );
+  reconciled($comb);
+  $k8s->clear_calls;
+  my $status = reconciled($comb);
+  is $status->phase, 'Running', 'Running';
+  ok !$k8s->calls_of('ensure'), 'nothing applied';
+};
+
+subtest 'a reconcile during a rolling restart keeps it' => sub {
+  my ( $comb, $k8s ) = comb();
+  reconciled($comb);
+  $comb->restart->get;
+  my $at = sub {
+    my $template = $k8s->object( Deployment => 'nats', namespace => 'platform' )->TO_JSON->{spec}{template};
+    return ( $template->{metadata}{annotations} // {} )->{'comb.internal/restartedAt'};
+  };
+  my $restarted = $at->();
+  ok defined $restarted, 'restarted';
+  $k8s->clear_calls;
+
+  # the rollout is under way: not all replicas ready
+  is reconciled($comb)->phase, 'Pending', 'mid-rollout: deployed, Pending';
+  my ( $sent ) = map { $_->[0] } $k8s->calls_of('ensure');
+  is $sent->{spec}{template}{metadata}{annotations}{'comb.internal/restartedAt'}, $restarted,
+    'the applied manifest carries the restart over';
+  is $at->(), $restarted, 'so the Pods are not rolled once more';
+  is_deeply [ map { $_->[0] } $k8s->calls_of('list') ], [ 'apps/v1/Deployment', 'v1/Pod' ],
+    'from the objects the status read already fetched';
+};
+
 subtest 'Disabled' => sub {
   my ( $off, $k8s ) = cr_comb( spec => { enabled => 0 }, status => $previous );
   my $status = reconciled($off);

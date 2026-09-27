@@ -274,6 +274,60 @@ subtest 'from upstream back to local' => sub {
   is reconciled($comb)->phase, 'Running', 'then Running';
 };
 
+subtest 'from upstream back to local, through steps that stop early' => sub {
+  # A Comb of Services only: the bridge looks healthy in their place.
+  my ( $comb, $k8s, $answer ) = comb( parts => [ service('nats') ] );
+  @$answer = from_dev();
+  my $borrowed = reconciled($comb);
+  my @redirected = @{ published($borrowed) };
+
+  $comb->missing( [ 'secret nats-auth' ] );
+  my $status = reconciled($comb);
+  is $status->phase, 'NeedsConfig', 'NeedsConfig';
+  my $carried = $status->upstream;
+  ok $carried, 'status.upstream carried forward: the bridge still stands';
+  is $carried && $carried->class, $static, '... its class';
+  is $carried && $carried->observedAt, $borrowed->upstream->observedAt, '... as it was observed';
+  is_deeply published($status), \@redirected, 'status.endpoints carried forward: the redirected ones';
+
+  @$answer = ( sub { die "registry down\n" } );
+  $status = reconciled($comb);
+  is ready($status)->reason, 'UpstreamFailed', 'an Error before the path';
+  ok $status->upstream, '... carries status.upstream forward too';
+  is_deeply published($status), \@redirected, '... and status.endpoints';
+
+  $comb->missing( [] );
+  @$answer = ();
+  $k8s->fail_on( list => 'connection reset', times => 1 );
+  $status = reconciled($comb);
+  is ready($status)->reason, 'StatusFailed', 'local, but the live status cannot be read';
+  ok $status->upstream, '... nothing replaced the bridge: status.upstream stays';
+  is stored( $k8s, Service => 'nats' )->{spec}{type}, 'ExternalName', '... and so does the bridge';
+
+  $k8s->clear_calls;
+  $status = reconciled($comb);
+  is_step( $status, Pending => Deployed => qr/\Aapplied 1 resource\(s\), in place of the bridge\z/,
+    'local: deployed although healthy-looking' );
+  is stored( $k8s, Service => 'nats' )->{spec}{selector}{app}, 'nats', 'the Service is the local one again';
+  ok !$status->upstream, 'status.upstream gone';
+  is_deeply published($status), [ { name => 'client', protocol => 'tcp', port => 4222, cluster => 'nats.platform.svc:4222' } ],
+    'the local endpoints published';
+  is reconciled($comb)->phase, 'Running', 'then Running';
+};
+
+subtest 'early stops of a local Comb carry its endpoints' => sub {
+  my ( $comb, $k8s, $answer ) = comb();
+  my $first = reconciled($comb);
+  my @local = @{ published($first) };
+  ok @local, 'local endpoints published';
+  $comb->missing( [ 'secret nats-auth' ] );
+  @$answer = from_dev();
+  my $status = reconciled($comb);
+  is $status->phase, 'NeedsConfig', 'about to borrow, but NeedsConfig';
+  ok !$status->upstream, 'no status.upstream: nothing was borrowed yet';
+  is_deeply published($status), \@local, 'the local endpoints still stand';
+};
+
 subtest 'a chain longer than max_upstream_depth is a loop: Blocked' => sub {
   my @client = ( endpoints => [ { name => 'client', port => 4222, cluster => 'nats.dev.example.com:4222' } ] );
   my @layers = map { 'layer'.$_ } 1 .. 17;

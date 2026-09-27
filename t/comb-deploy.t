@@ -7,6 +7,7 @@ use Future;
 use IO::K8s;
 use Kubernetes::Comb;
 use Kubernetes::Comb::Client::Fake;
+use Scalar::Util qw( blessed );
 use TestComb::Fixtures qw( comb_labels );
 
 my $io = IO::K8s->new;
@@ -210,6 +211,57 @@ subtest 'errors in the class become failed Futures' => sub {
     ok $f->is_failed, $what.' fails';
     like scalar $f->failure, $error, $what.': says why';
   }
+};
+
+subtest 'a restart stays: the live restart annotation is kept' => sub {
+  my $store = $io->new_object( StatefulSet => {
+    metadata => { name => 'store' },
+    spec     => { serviceName => 'store', %{ deployment('store')->{spec} } }
+  } );
+  local @MANIFESTS = ( deployment('web'), $store, { %{ deployment('agent') }, kind => 'DaemonSet' } );
+  my ( $comb, $k8s ) = comb();
+  $comb->deploy->get;
+  my @restarted = $comb->restart->get;
+  is scalar @restarted, 3, 'restarted';
+  my %at = map {
+    my $template = $_->TO_JSON->{spec}{template};
+    ( $_->kind.'/'.$_->metadata->name => $template->{metadata}{annotations}{'comb.internal/restartedAt'} );
+  } map { $k8s->objects_of( $_, namespace => 'platform' ) } qw( Deployment StatefulSet DaemonSet );
+  ok defined $at{$_}, $_.' carries the annotation' for sort keys %at;
+
+  push @MANIFESTS, deployment('fresh');   # new since the restart
+  $k8s->clear_calls;
+  $comb->deploy->get;
+  my %sent = map {
+    my $sent = blessed $_->[0] ? $_->[0]->TO_JSON : $_->[0];
+    ( $sent->{kind}.'/'.$sent->{metadata}{name} => $sent );
+  } $k8s->calls_of('ensure');
+  for my $what ( sort keys %at ) {
+    my $template = $sent{$what}{spec}{template}{metadata};
+    is $template->{annotations}{'comb.internal/restartedAt'}, $at{$what}, $what.': the applied manifest keeps it';
+    is_deeply $template->{labels}, { app => ( split m{/}, $what )[1], %labels }, $what.': labelled as ever';
+  }
+  ok !exists $sent{'Deployment/fresh'}{spec}{template}{metadata}{annotations}, 'none where there is no live one';
+  ok blessed( ( grep { blessed $_->[0] } $k8s->calls_of('ensure') )[0][0] ), 'an IO::K8s manifest stays an object';
+  is $k8s->object( Deployment => 'web', namespace => 'platform' )->TO_JSON->{spec}{template}{metadata}{annotations}
+    {'comb.internal/restartedAt'}, $at{'Deployment/web'}, 'the restart stands';
+  is_deeply [ sort map { $_->[0] } $k8s->calls_of('list') ],
+    [ '+IO::K8s::Api::Apps::V1::StatefulSet', 'apps/v1/DaemonSet', 'apps/v1/Deployment' ], 'one list per kind';
+  is_deeply [ map { $_->[4] } $k8s->calls_of('list') ], [ ('comb.internal/comb=parts') x 3 ], '... by the Comb label';
+  ok !exists $MANIFESTS[0]{spec}{template}{metadata}{annotations}, 'what the class returned is left as it was';
+};
+
+subtest 'a restart annotation that cannot be read: deploy fails, nothing applied' => sub {
+  local @MANIFESTS = ( deployment('web') );
+  my ( $comb, $k8s ) = comb();
+  $k8s->fail_on( list => 'connection refused' );
+  my $f = $comb->deploy;
+  ok $f->is_failed, 'failed Future';
+  my ( $message, $category, $details ) = $f->failure;
+  like $message, qr/\Areading the live workloads failed: connection refused/, 'says so';
+  is $category, 'deploy', 'category deploy';
+  is_deeply $details->{applied}, [], 'nothing applied';
+  ok !$k8s->calls_of('ensure'), 'nothing tried';
 };
 
 subtest 'manifests may return a Future' => sub {

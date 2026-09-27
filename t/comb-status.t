@@ -353,6 +353,95 @@ subtest 'stopped' => sub {
   isnt status_of($comb)->{phase}, 'Stopped', 'a CronJob running again';
 };
 
+sub daemonset {
+  my ( $name ) = @_;
+  return {
+    apiVersion => 'apps/v1',
+    kind       => 'DaemonSet',
+    metadata   => { name => $name },
+    spec       => {
+      selector => { matchLabels => { app => $name } },
+      template => { metadata => { labels => { app => $name } }, spec => { containers => [ { name => 'a', image => 'img' } ] } }
+    }
+  };
+}
+
+subtest 'stopped: what stop leaves running does not count' => sub {
+  local @MANIFESTS = ( deployment('nats'), daemonset('agent') );
+  my ( $comb, $k8s ) = deployed();
+  set_status( $k8s, Deployment => 'nats', { replicas => 1, readyReplicas => 1 } );
+  set_status( $k8s, DaemonSet => 'agent', { desiredNumberScheduled => 1, numberReady => 1,
+    currentNumberScheduled => 1, numberMisscheduled => 0 } );
+  is status_of($comb)->{phase}, 'Running', 'running';
+
+  $comb->stop->get;
+  set_status( $k8s, Deployment => 'nats', { replicas => 0 } );
+  my $status = status_of($comb);
+  is $status->{phase}, 'Stopped', 'the DaemonSet stop leaves alone: still Stopped';
+  ok !$status->{healthy}, 'not healthy';
+
+  local @MANIFESTS = ( deployment('nats'), { apiVersion => 'apps/v1', kind => 'ReplicaSet', metadata => { name => 'nats-rs' },
+    spec => { selector => { matchLabels => { app => 'rs' } }, template => { metadata => { labels => { app => 'rs' } },
+      spec => { containers => [ { name => 'main', image => 'img' } ] } } } } );
+  ( $comb, $k8s ) = deployed();
+  set_status( $k8s, ReplicaSet => 'nats-rs', { replicas => 1, readyReplicas => 1 } );
+  $comb->stop->get;
+  is status_of($comb)->{phase}, 'Stopped', 'nor does a ReplicaSet';
+};
+
+subtest 'scaled below the manifest: short of replicas' => sub {
+  local @MANIFESTS = ( deployment('nats'), deployment('nats-web') );
+  my ( $comb, $k8s ) = deployed();
+  set_status( $k8s, Deployment => $_, { replicas => 1, readyReplicas => 1 } ) for qw( nats nats-web );
+  is status_of($comb)->{phase}, 'Running', 'both ready';
+
+  # kubectl scale --replicas=0 deployment/nats-web
+  $k8s->patch( 'Deployment', 'nats-web', namespace => 'platform', patch => { spec => { replicas => 0 } } )->get;
+  set_status( $k8s, Deployment => 'nats-web', { replicas => 0 } );
+  my $status = status_of($comb);
+  is $status->{phase}, 'Pending', 'one scaled to 0: Pending, not Running';
+  ok !$status->{healthy}, 'not healthy';
+  is $status->{reason}, 'ReplicasNotReady', 'reason';
+  like $status->{message}, qr/Deployment nats-web: 0 of 1 ready \(scaled to 0\)/,
+    'measured against the manifest (no replicas: 1, what deploy sets)';
+
+  local @MANIFESTS = ( deployment( 'nats', replicas => 3 ) );
+  ( $comb, $k8s ) = deployed();
+  $k8s->patch( 'Deployment', 'nats', namespace => 'platform', patch => { spec => { replicas => 1 } } )->get;
+  set_status( $k8s, Deployment => 'nats', { replicas => 1, readyReplicas => 1 } );
+  like status_of($comb)->{message}, qr/Deployment nats: 1 of 3 ready \(scaled to 1\)/, 'scaled to 1 of 3';
+};
+
+subtest 'scaled beyond the manifest: the scale counts' => sub {
+  local @MANIFESTS = ( deployment( 'nats', replicas => 2 ) );
+  my ( $comb, $k8s ) = deployed();
+  # an autoscaler at work
+  $k8s->patch( 'Deployment', 'nats', namespace => 'platform', patch => { spec => { replicas => 4 } } )->get;
+  set_status( $k8s, Deployment => 'nats', { replicas => 4, readyReplicas => 3 } );
+  my $status = status_of($comb);
+  is $status->{phase}, 'Pending', 'three of four: Pending';
+  like $status->{message}, qr/Deployment nats: 3 of 4 ready\z/, 'against the scale';
+  set_status( $k8s, Deployment => 'nats', { replicas => 4, readyReplicas => 4 } );
+  is status_of($comb)->{phase}, 'Running', 'all four: Running';
+};
+
+subtest 'at rest as the manifest says: Running, not Stopped' => sub {
+  local @MANIFESTS = ( deployment( 'nats', replicas => 0 ),
+    { %{ cronjob('backup') }, spec => { %{ cronjob('backup')->{spec} }, suspend => \1 } } );
+  my ( $comb, $k8s ) = deployed();
+  my $status = status_of($comb);
+  is $status->{phase}, 'Running', 'replicas 0 and suspended by the manifest: Running';
+  ok $status->{healthy}, 'healthy';
+
+  $comb->stop->get;
+  is status_of($comb)->{phase}, 'Running', 'stop changes nothing then';
+
+  local @MANIFESTS = ( deployment( 'nats', replicas => 0 ), deployment('nats-web') );
+  ( $comb, $k8s ) = deployed();
+  $comb->stop->get;
+  is status_of($comb)->{phase}, 'Stopped', 'one stopped against its manifest: Stopped';
+};
+
 subtest 'errors fail the Future' => sub {
   local @MANIFESTS = ( deployment('nats') );
   my ( $comb, $k8s ) = deployed();

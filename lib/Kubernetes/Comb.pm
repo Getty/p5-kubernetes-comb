@@ -93,6 +93,16 @@ my %REPLICATED = map { $_ => 1 } qw(
   /ReplicationController apps/Deployment apps/StatefulSet apps/ReplicaSet
 );
 
+# What L</stop> brings to rest, with the spec field that says so.
+my %STOPPABLE = (
+  'apps/Deployment'  => 'replicas',
+  'apps/StatefulSet' => 'replicas',
+  'batch/CronJob'    => 'suspend'
+);
+
+# What L</restart> rolls through its Pod template annotation.
+my %RESTARTABLE = map { $_ => 1 } qw( apps/Deployment apps/StatefulSet apps/DaemonSet );
+
 # Container waiting reasons that do not go away by waiting.
 my %FAILURE_REASONS = map { $_ => 1 } qw(
   CrashLoopBackOff ImagePullBackOff ErrImagePull ErrImageNeverPull InvalidImageName
@@ -671,23 +681,36 @@ L</check> reports missing prerequisites: C<NeedsConfig>.
 
 =item 5a. Local
 
-Without an upstream. L</status> healthy: C<Running>. Otherwise L</deploy>,
-then prune: every namespaced resource this Comb recorded in
-C<managedResources> that it no longer renders -- compared by group, kind,
-namespace and name, so a new API version is no orphan -- is deleted if it
-still carries L</label_selector>, name and namespace of this Comb. One that
-does not -- it lost the labels, or a same-named Comb of another namespace
-applied it last -- is left alone and dropped from the record, one that is
-gone is dropped, one that fails to delete stays for the next step. A
-cluster-scoped one is never deleted: a Namespace or a
+Without an upstream. L</status> healthy and C<managedResources> naming
+just what the manifests render: C<Running>, nothing applied.
+
+Not healthy: L</deploy>, then prune: every namespaced resource this Comb
+recorded in C<managedResources> that it no longer renders -- compared by
+group, kind, namespace and name, so a new API version is no orphan -- is
+deleted if it still carries L</label_selector>, name and namespace of this
+Comb. One that does not -- it lost the labels, or a same-named Comb of
+another namespace applied it last -- is left alone and dropped from the
+record, one that is gone is dropped, one that fails to delete stays for the
+next step. A cluster-scoped one is never deleted: a Namespace or a
 CustomResourceDefinition takes far more with it, and a same-named Comb of
 another namespace may render it too. It is dropped from the record and left
 in place, which the C<Ready> message says. Then C<Pending>. A deploy that
 fails half-way is an C<Error> that records what it applied on top of the
-previous record, and prunes nothing. A reconcile after L</stop> deploys again, which scales the
-workloads back up. The first step after borrowing from an upstream deploys
-even when L</status> looks healthy, since the bridge may stand where the
-local resources belong.
+previous record, and prunes nothing.
+
+Healthy, but the record names other resources than the manifests render --
+one dropped from the manifests, a delete that failed, one that runs but was
+never recorded: deploy and prune all the same, and stay C<Running>, the
+C<Ready> message saying so. Everything the manifests render was live and
+healthy before. Only the set of resources is compared: a manifest whose
+content changed (a new image) is applied when the Comb is not healthy or
+its record differs, not because of that change.
+
+A workload scaled below its manifest counts as not healthy (see
+L</status>), so a reconcile after L</stop>, or after scaling a Deployment
+down by hand, deploys again, which scales the workloads back up. The first
+step after borrowing from an upstream deploys even when L</status> looks
+healthy, since the bridge may stand where the local resources belong.
 
 =item 5b. Upstream
 
@@ -726,12 +749,23 @@ recorded in C<status.upstream>.
 
 Phase, conditions, the resolved endpoints -- the redirected ones while
 borrowing, once they are known --, C<status.upstream> while an upstream is
-active, C<managedResources> (carried forward by the steps that do not
-deploy) and C<observedGeneration> go through C<update_status> into L</crd>,
-which is replaced by what the API server returns; without a custom resource
-the status is kept in memory. A failed write is retried once on a freshly
-read custom resource; if that fails too the status is kept in memory and
-carries a C<StatusWritten> condition that says why.
+active, C<managedResources> and C<observedGeneration> go through
+C<update_status> into L</crd>, which is replaced by what the API server
+returns; without a custom resource the status is kept in memory. A failed
+write is retried once on a freshly read custom resource; if that fails too
+the status is kept in memory and carries a C<StatusWritten> condition that
+says why.
+
+A step that changes nothing that serves carries C<managedResources>, the
+endpoints and C<status.upstream> of the previous status forward: one that
+stops before step 5 (C<Disabled>, C<Blocked> by its dependencies,
+C<NeedsConfig>, an C<Error> there), and a local step that fails before it is
+through. So a bridge stays recorded -- and replaced by the next local step
+-- until the local path has deployed in its place; C<status.upstream> goes
+once it has. On the very first step there is nothing to carry, and a local
+Comb publishes its own endpoints. The upstream path records what its
+upstream says now, and endpoints only once the upstream offers an address
+for each.
 
 =back
 
@@ -759,6 +793,14 @@ that name none, and creates or updates them one after the other. Future of
 the objects as stored. A failure stops at that resource; the Future fails
 with the message, category C<deploy> and C<< { applied => [...], failed => $manifest } >>.
 Manifests that do not render fail it with category C<manifests>.
+
+An update replaces the object with what the manifest says, so the Pod
+template of a live Deployment, StatefulSet or DaemonSet would lose the
+L</restart_annotation> L</restart> put there -- rolling its Pods once more,
+or undoing a restart under way. Deploy keeps it: the rendered Pod template
+gets the live value. It reads those workloads first, one list by
+L</comb_label> per kind (L</reconcile> passes on what it has read anyway);
+when that fails, so does the deploy -- category C<deploy>, nothing applied.
 
 =cut
 
@@ -790,11 +832,18 @@ It looks for every rendered resource (by L</comb_label> alone: where a
 same-named Comb of another namespace renders the same resource, the one that
 applied it last owns it, and both find it) and at the Pods of the Comb (by
 L</label_selector>). C<NotDeployed>: none of the resources exists.
-C<Stopped>: the workloads are scaled to zero or suspended, as L</stop> leaves
-them.
+C<Stopped>: as L</stop> leaves the Comb -- every Deployment and StatefulSet
+at 0 replicas, every CronJob suspended, at least one of them against its
+manifest. What stop leaves running (a DaemonSet, a ReplicaSet, a bare Pod)
+does not keep a Comb from C<Stopped>; a manifest that says C<replicas: 0> or
+C<suspend: true> itself is at rest as rendered, not stopped.
 C<Running>: every resource exists, every Pod that should run has all its
 containers ready, the replicated workloads have their ready replicas and the
-Jobs completed. A Comb without workloads is running once its resources
+Jobs completed. A replicated workload wants the replicas of its manifest
+(default 1, what L</deploy> sets); scaled below that, by hand or by
+L</stop>, it is short of them (C<ReplicasNotReady>, "scaled to" in the
+message), scaled beyond it -- by hand, by an autoscaler -- it wants its
+scale. A Comb without workloads is running once its resources
 exist. Waiting and terminated container reasons, restart counts and
 C<PodScheduled=False> make up the reasons and messages; a reason that does not
 pass by waiting (C<CrashLoopBackOff>, C<ImagePullBackOff>, a failed Job, a
@@ -874,7 +923,7 @@ sub restart {
 Rolling restart: sets L</restart_annotation> to the current time (RFC 3339)
 on the Pod template of every Deployment, StatefulSet and DaemonSet of the
 Comb; deletes its Jobs. Future of the list of what it touched, as
-C<Kind/name>.
+C<Kind/name>. L</deploy> -- and so L</reconcile> -- keeps the annotation.
 
 =cut
 
@@ -897,7 +946,8 @@ sub stop {
 
 Scales the Deployments and StatefulSets of the Comb to 0, suspends its
 CronJobs and deletes its Jobs. Future of the list of what it touched, as
-C<Kind/name>.
+C<Kind/name>. L</status> is C<Stopped> then; the next L</reconcile> deploys
+the Comb again.
 
 =cut
 
@@ -1013,18 +1063,20 @@ sub _item {
   croak ref($self).': manifest '.$kind.' has no metadata.name' unless defined $name && length $name;
 
   my $labels = $self->comb_labels;
-  my $object = $self->_labeled( $data, [], $labels );
+  my $object = $self->_merged_meta( $data, [], labels => $labels );
   $object->{apiVersion} //= $self->_api_version_of($kind);
   my ( $group ) = $object->{apiVersion} =~ m{\A(.+)/[^/]+\z};
   $group //= '';
   my $templates = $WORKLOAD_TEMPLATES{ $group.'/'.$kind };
-  $object = $self->_labeled( $object, $_, $labels ) for @{ $templates // [] };
+  $object = $self->_merged_meta( $object, $_, labels => $labels ) for @{ $templates // [] };
   my $namespace = $object->{metadata}{namespace};
   $object->{metadata}{namespace} = $namespace = $self->namespace
     if !( defined $namespace && length $namespace ) && $self->_namespaced( $class, $object );
 
   return {
     manifest   => $class ? $class->FROM_HASH($object) : $object,
+    data       => $object,
+    class      => $class,
     apiVersion => $object->{apiVersion},
     kind       => $kind,
     group      => $group,
@@ -1037,19 +1089,27 @@ sub _item {
   };
 }
 
-# A copy of $node with $labels merged into the metadata at $path below it,
-# copying only what it changes. A path that does not exist is left alone.
-sub _labeled {
-  my ( $self, $node, $path, $labels ) = @_;
+# A copy of $node with $values merged into metadata.$field (labels,
+# annotations) at $path below it, copying only what it changes. A path that
+# does not exist is left alone.
+sub _merged_meta {
+  my ( $self, $node, $path, $field, $values ) = @_;
   my %copy = %$node;
   if ( my ( $key, @rest ) = @$path ) {
-    $copy{$key} = $self->_labeled( $copy{$key}, \@rest, $labels ) if ref $copy{$key} eq 'HASH';
+    $copy{$key} = $self->_merged_meta( $copy{$key}, \@rest, $field, $values ) if ref $copy{$key} eq 'HASH';
     return \%copy;
   }
   my %meta = ref $copy{metadata} eq 'HASH' ? %{ $copy{metadata} } : ();
-  $meta{labels} = { %{ $meta{labels} // {} }, %$labels };
+  $meta{$field} = { %{ $meta{$field} // {} }, %$values };
   $copy{metadata} = \%meta;
   return \%copy;
+}
+
+# The spec the item renders, {} when it has none.
+sub _rendered_spec {
+  my ( $self, $item ) = @_;
+  my $spec = $item->{data}{spec};
+  return ref $spec eq 'HASH' ? $spec : {};
 }
 
 sub _api_version_of {
@@ -1078,32 +1138,71 @@ sub _namespaced {
 sub _apply {
   my ( $self, @items ) = @_;
   my @applied;
-  return ( fmap_void {
-    my ( $item ) = @_;
-    $self->k8s->ensure( $item->{manifest} )->then(
-      sub { push @applied, $_[0]; Future->done },
-      sub {
-        Future->fail(
-          'ensure '.$item->{kind}.' '.$item->{name}.': '.$_[0],
-          deploy => { applied => [@applied], failed => $item->{manifest} }
-        );
-      }
-    );
-  } foreach => \@items, concurrent => 1 )->then( sub { Future->done(@applied) } );
+  return $self->_keep_restarts(@items)->else( sub {
+    Future->fail( 'reading the live workloads failed: '.$self->_message( $_[0] ), deploy => { applied => [] } );
+  } )->then( sub {
+    my @kept = @_;
+    return ( fmap_void {
+      my ( $item ) = @_;
+      $self->k8s->ensure( $item->{manifest} )->then(
+        sub { push @applied, $_[0]; Future->done },
+        sub {
+          Future->fail(
+            'ensure '.$item->{kind}.' '.$item->{name}.': '.$_[0],
+            deploy => { applied => [@applied], failed => $item->{manifest} }
+          );
+        }
+      );
+    } foreach => \@kept, concurrent => 1 )->then( sub { Future->done(@applied) } );
+  } );
+}
+
+# Future of the items, each Deployment, StatefulSet and DaemonSet with the
+# restart annotation of its live Pod template: ensure replaces the object,
+# and without it the Pods would roll once more -- or a rolling restart would
+# be undone. Reads the live objects the items do not have yet.
+sub _keep_restarts {
+  my ( $self, @items ) = @_;
+  return Future->call( sub {
+    my @unread = grep { $RESTARTABLE{ $_->{group}.'/'.$_->{kind} } && !exists $_->{live} } @items;
+    return ( @unread ? $self->_fetch_live(@unread) : Future->done )->then( sub {
+      Future->done( map { $self->_restart_kept($_) } @items );
+    } );
+  } );
+}
+
+sub _restart_kept {
+  my ( $self, $item ) = @_;
+  return $item unless $RESTARTABLE{ $item->{group}.'/'.$item->{kind} } && $item->{live};
+  my $template = $item->{live}->TO_JSON->{spec}{template};
+  my $meta = ref $template eq 'HASH' ? $template->{metadata} : undef;
+  my $at = ref $meta eq 'HASH' && ref $meta->{annotations} eq 'HASH'
+    ? $meta->{annotations}{ $self->restart_annotation }
+    : undef;
+  return $item unless defined $at;
+  my $data = $self->_merged_meta( $item->{data}, [qw( spec template )],
+    annotations => { $self->restart_annotation => $at } );
+  return { %$item, data => $data, manifest => $item->{class} ? $item->{class}->FROM_HASH($data) : $data };
 }
 
 # What status says of a Comb that runs its own resources.
 sub _local_status {
   my ( $self ) = @_;
   return Future->call( sub {
-    $self->_render->then( sub {
-      my @items = @_;
-      return Future->done( $self->_status_of( \@items, [] ) ) unless @items;
-      return $self->_fetch_live(@items)->then( sub {
-        return Future->done( $self->_status_of( \@items, [] ) )
-          unless grep { $_->{workload} && $_->{live} } @items;
-        return $self->_pods->then( sub { Future->done( $self->_status_of( \@items, [@_] ) ) } );
-      } );
+    $self->_render->then( sub { $self->_observe_local(@_) } );
+  } );
+}
+
+# Future of what status says of the rendered @items; each item gets its live
+# object (or undef) in $item->{live}.
+sub _observe_local {
+  my ( $self, @items ) = @_;
+  return Future->call( sub {
+    return Future->done( $self->_status_of( \@items, [] ) ) unless @items;
+    return $self->_fetch_live(@items)->then( sub {
+      return Future->done( $self->_status_of( \@items, [] ) )
+        unless grep { $_->{workload} && $_->{live} } @items;
+      return $self->_pods->then( sub { Future->done( $self->_status_of( \@items, [@_] ) ) } );
     } );
   } );
 }
@@ -1218,20 +1317,27 @@ sub _verdict {
 }
 
 # What L</stop> leaves: every Deployment/StatefulSet at 0, every CronJob
-# suspended, nothing else that keeps running (its Jobs it deletes).
+# suspended -- at least one of them against its manifest. The workloads stop
+# does not bring to rest (a DaemonSet, a ReplicaSet, a bare Pod) do not
+# count either way, its Jobs it deletes. A manifest that says 0 or
+# suspended itself is at rest as rendered, not stopped.
 sub _stopped {
   my ( $self, $items ) = @_;
-  my $stoppable = 0;
-  for my $item ( grep { $_->{workload} } @$items ) {
-    my $key = $item->{group}.'/'.$item->{kind};
-    next if $key eq 'batch/Job';
-    return 0 unless $key eq 'apps/Deployment' || $key eq 'apps/StatefulSet' || $key eq 'batch/CronJob';
-    next unless $item->{live};
-    my $spec = $item->{live}->TO_JSON->{spec} // {};
-    return 0 if $key eq 'batch/CronJob' ? !$spec->{suspend} : ( $spec->{replicas} // 1 ) != 0;
-    $stoppable++;
+  my $against = 0;
+  for my $item ( grep { $_->{live} } @$items ) {
+    my $field = $STOPPABLE{ $item->{group}.'/'.$item->{kind} } or next;
+    my $live = $item->{live}->TO_JSON->{spec} // {};
+    my $want = $self->_rendered_spec($item);
+    if ( $field eq 'suspend' ) {
+      return 0 unless $live->{suspend};
+      $against++ unless $want->{suspend};
+    }
+    else {
+      return 0 if ( $live->{replicas} // 1 ) != 0;
+      $against++ if ( $want->{replicas} // 1 ) != 0;
+    }
   }
-  return $stoppable ? 1 : 0;
+  return $against ? 1 : 0;
 }
 
 sub _workload_problem {
@@ -1256,12 +1362,18 @@ sub _workload_problem {
     return { severity => 'pending', reason => 'JobNotComplete', message => $what.' has not completed' };
   }
 
-  my ( $ready, $desired );
+  my ( $ready, $desired, $scaled_down );
   if ( $key eq 'apps/DaemonSet' ) {
     ( $ready, $desired ) = ( $status->{numberReady} // 0, $status->{desiredNumberScheduled} // 0 );
   }
   elsif ( $REPLICATED{$key} ) {
-    ( $ready, $desired ) = ( $status->{readyReplicas} // 0, $spec->{replicas} // 1 );
+    # Scaled below what the manifest says -- deploy sets that, default 1 --
+    # by stop or by hand is short of replicas; scaled beyond it (by hand, an
+    # autoscaler), the scale counts.
+    my $scaled = $spec->{replicas} // 1;
+    my $wanted = $self->_rendered_spec($item)->{replicas} // 1;
+    $scaled_down = $scaled < $wanted ? $scaled : undef;
+    ( $ready, $desired ) = ( $status->{readyReplicas} // 0, $scaled < $wanted ? $wanted : $scaled );
   }
   else {
     return;   # a bare Pod speaks for itself, a CronJob has nothing to wait for
@@ -1271,6 +1383,7 @@ sub _workload_problem {
     severity => 'pending',
     reason   => 'ReplicasNotReady',
     message  => $what.': '.$ready.' of '.$desired.' ready'
+      .( defined $scaled_down ? ' (scaled to '.$scaled_down.')' : '' )
   };
 }
 
@@ -1770,8 +1883,11 @@ sub _ip_address {
 # from), conditions (type => { status, reason, message }), upstream (the
 # resolved one, undef for local; absent while unresolved), then phase, reason
 # and message, and -- where a step knows them -- managed (resource hashrefs)
-# and endpoints (Kubernetes::Comb::Endpoint). Each step either finishes $r
-# or hands it to the next; a step whose own work fails finishes it as Error.
+# and endpoints (Kubernetes::Comb::Endpoint). established says which path
+# settled what serves: local once the local path is through (healthy, or
+# deployed and pruned), upstream once the upstream path observed its
+# upstream. Each step either finishes $r or hands it to the next; a step
+# whose own work fails finishes it as Error.
 
 sub _status_class  { 'Kubernetes::Comb::CRD::CombStatus' }
 sub _upstream_role { 'Kubernetes::Comb::Role::Upstream' }
@@ -1904,24 +2020,53 @@ sub _reconcile_check {
 # Step 5a.
 sub _reconcile_local {
   my ( $self, $r ) = @_;
-  my $manifests_failed = sub {
-    $self->_finish( $r, Error => ManifestsFailed => 'rendering the manifests failed: '.$self->_message( $_[0] ) );
-  };
   # After borrowing, the bridge may stand where the local resources belong,
   # and look healthy: deploy anyway.
   my $borrowed = $r->{previous} && $r->{previous}->upstream;
-  return $self->_local_status->then(
+  return $self->_render->then(
     sub {
-      my ( $live ) = @_;
-      return $self->_finish( $r, Running => Healthy => 'healthy' ) if $live->{healthy} && !$borrowed;
-      return $self->_render->then( sub { $self->_deploy_and_prune( $r, $live, @_ ) }, $manifests_failed );
+      my @items = @_;
+      return $self->_observe_local(@items)->then(
+        sub {
+          my ( $live ) = @_;
+          return $self->_deploy_and_prune( $r, $live, @items ) if !$live->{healthy} || $borrowed;
+          return $self->_settle_record( $r, @items ) if $self->_record_differs( $r, @items );
+          $r->{established} = 'local';
+          return $self->_finish( $r, Running => Healthy => 'healthy' );
+        },
+        sub {
+          $self->_finish( $r, Error => StatusFailed => 'reading the live status failed: '.$self->_message( $_[0] ) );
+        }
+      );
     },
     sub {
-      my ( $error, $category ) = @_;
-      return $manifests_failed->($error) if ( $category // '' ) eq 'manifests';
-      return $self->_finish( $r, Error => StatusFailed => 'reading the live status failed: '.$self->_message($error) );
+      $self->_finish( $r, Error => ManifestsFailed => 'rendering the manifests failed: '.$self->_message( $_[0] ) );
     }
   );
+}
+
+# Whether the rendered items and the recorded managedResources name
+# different resources (by group, kind, namespace, name): something to prune
+# -- dropped from the manifests, or a delete that failed -- or something
+# that runs but is not recorded.
+sub _record_differs {
+  my ( $self, $r, @items ) = @_;
+  my %recorded = map { ( $self->_resource_key($_) => 1 ) } $self->_previous_resources($r);
+  my %rendered = map { ( $self->_resource_key( $self->_resource_of($_) ) => 1 ) } @items;
+  return 1 if keys %recorded != keys %rendered;
+  return grep( { !$recorded{$_} } keys %rendered ) ? 1 : 0;
+}
+
+# A healthy Comb whose record differs: deploy and prune all the same, so
+# the debt is paid while it runs. Everything rendered was live and healthy
+# before, so it stays Running.
+sub _settle_record {
+  my ( $self, $r, @items ) = @_;
+  return $self->_apply_and_prune( $r, sub {
+    $r->{established} = 'local';
+    $self->_finish( $r, Running => Healthy => join '; ',
+      'healthy', 'the record differed from the manifests: applied '.scalar(@items).' resource(s)', @_ );
+  }, @items );
 }
 
 # Step 5b, the upstream path: upstream status and endpoints, replicate_into,
@@ -1931,6 +2076,7 @@ sub _reconcile_upstream {
   my $upstream = $r->{upstream};
   return $self->_observe_upstream($upstream)->then( sub {
     my ( $o ) = @_;
+    $r->{established} = 'upstream';
     $r->{upstream_status} = $self->_upstream_record($o);
     $r->{endpoints} = $o->{endpoints} if $o->{endpoints};
     return $self->_finish( $r, @{ $o->{stop} } ) if $o->{stop};
@@ -1957,6 +2103,7 @@ sub _deploy_and_prune {
   my $state = $live->{healthy} ? 'in place of the bridge'
             : 'not healthy yet'.( $live->{phase} ne 'NotDeployed' && $live->{message} ? ' ('.$live->{message}.')' : '' );
   return $self->_apply_and_prune( $r, sub {
+    $r->{established} = 'local';
     $self->_finish( $r, Pending => Deployed => join '; ', 'applied '.scalar(@items).' resource(s), '.$state, @_ );
   }, @items );
 }
@@ -2177,11 +2324,16 @@ sub _checked_upstream {
   return $upstream;
 }
 
-# Step 6, first half: the resolved local endpoints -- the upstream path
-# brings its own.
+# Step 6, first half: the resolved local endpoints once the local path
+# established them. The upstream path brings its own; a step that
+# established nothing carries the previous ones forward (see _status_from)
+# -- unless there are none, then a local Comb publishes its own.
 sub _publish_endpoints {
   my ( $self, $r ) = @_;
-  return Future->done($r) if $r->{endpoints} || !exists $r->{upstream} || defined $r->{upstream};
+  my $established = $r->{established} // '';
+  my $local = $established eq 'local'
+    || ( !$established && !$r->{previous} && exists $r->{upstream} && !defined $r->{upstream} );
+  return Future->done($r) if $r->{endpoints} || !$local;
   return Future->call( sub { Future->done( $self->_local_endpoints ) } )->then(
     sub {
       $r->{endpoints} = [@_];
@@ -2260,6 +2412,17 @@ sub _status_from {
   my %fixed = map { ( $_ => 1 ) } @fixed;
   my $meta = $self->has_crd ? $self->crd->metadata : undef;
   my $generation = $meta ? $meta->generation : undef;
+  # A step that established nothing -- it stopped before a path, or the
+  # local path failed before it was through -- changed nothing that serves:
+  # the endpoints and the upstream recorded before still stand, like
+  # managedResources. So a bridge stays known until the local path replaced
+  # it.
+  my $carried = $r->{established} ? undef : $r->{previous};
+  my @endpoints = $r->{endpoints} ? ( map { $_->to_crd } @{ $r->{endpoints} } )
+                : $carried        ? ( map { $_->TO_JSON } @{ $carried->endpoints // [] } )
+                :                   ();
+  my $upstream = $r->{upstream_status}
+    // ( $carried && $carried->upstream ? $carried->upstream->TO_JSON : undef );
   return $self->_status_class->new(
     phase            => $r->{phase},
     conditions       => [ map {
@@ -2275,9 +2438,9 @@ sub _status_from {
       };
     } @fixed, sort grep { !$fixed{$_} } keys %conditions ],
     managedResources => $r->{managed} // [ $self->_previous_resources($r) ],
-    endpoints        => [ map { $_->to_crd } @{ $r->{endpoints} // [] } ],
-    ( $r->{upstream_status} ? ( upstream           => $r->{upstream_status} ) : () ),
-    ( defined $generation   ? ( observedGeneration => $generation )           : () )
+    endpoints        => \@endpoints,
+    ( $upstream           ? ( upstream           => $upstream )   : () ),
+    ( defined $generation ? ( observedGeneration => $generation ) : () )
   );
 }
 

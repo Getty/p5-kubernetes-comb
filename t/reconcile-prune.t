@@ -221,17 +221,79 @@ subtest 'layers in one cluster: a borrowing layer leaves the other\'s cluster-sc
   is $comb{dev}->status->get->{phase}, 'Running', 'dev stays Running';
 };
 
-subtest 'no pruning without a deploy' => sub {
+subtest 'a healthy Comb prunes too: Running' => sub {
   my %old = ( apiVersion => 'v1', kind => 'Service', namespace => 'platform', name => 'old' );
   my ( $comb, $k8s ) = comb( {%old} );
   $k8s->add( service( 'old', namespace => 'platform', labels => {%labels} ) );
   $comb->deploy->get;
   set_status( $k8s, Deployment => 'nats', { readyReplicas => 1 } );
+  $k8s->clear_calls;
 
   my $status = $comb->reconcile->get;
   is $status->phase, 'Running', 'healthy: Running';
-  is_deeply deleted($k8s), [], 'nothing pruned';
-  is_deeply managed($status), [ {%deployment_nats}, {%old} ], 'the orphan stays recorded';
+  like ready_message($status), qr/\Ahealthy; the record differed from the manifests: applied 1 resource\(s\)\z/,
+    'saying why it deployed';
+  is scalar $k8s->calls_of('ensure'), 1, 'deployed';
+  is_deeply deleted($k8s), [ 'Service/old' ], 'the orphan is pruned';
+  is_deeply managed($status), [ {%deployment_nats} ], 'and no longer recorded';
+
+  $k8s->clear_calls;
+  $status = $comb->reconcile->get;
+  is $status->phase, 'Running', 'the record matches: Running';
+  ok !$k8s->calls_of('ensure'), 'nothing applied';
+  is ready_message($status), 'healthy', 'nothing to report';
+};
+
+subtest 'a failed delete is retried while healthy' => sub {
+  my %old = ( apiVersion => 'v1', kind => 'Service', namespace => 'platform', name => 'old' );
+  my ( $comb, $k8s ) = comb( {%old} );
+  $k8s->add( service( 'old', namespace => 'platform', labels => {%labels} ) );
+  $comb->deploy->get;
+  set_status( $k8s, Deployment => 'nats', { readyReplicas => 1 } );
+  $k8s->fail_on( delete => 'forbidden', times => 1 );
+
+  my $status = $comb->reconcile->get;
+  is $status->phase, 'Running', 'still Running';
+  like ready_message($status), qr/deleting Service old failed: forbidden/, 'reported';
+  is_deeply managed($status), [ {%deployment_nats}, {%old} ], 'kept in managedResources';
+
+  $status = $comb->reconcile->get;
+  ok !$k8s->object( Service => 'old', namespace => 'platform' ), 'the next step deletes it';
+  is_deeply managed($status), [ {%deployment_nats} ], 'and drops it';
+  is $status->phase, 'Running', 'Running throughout';
+};
+
+subtest 'a resource a healthy Comb drops from its manifests is pruned' => sub {
+  my %web = ( apiVersion => 'v1', kind => 'Service', namespace => 'platform', name => 'nats' );
+  my ( $comb, $k8s ) = comb();
+  $comb->parts( [ deployment('nats'), service('nats') ] );
+  $comb->reconcile->get;
+  set_status( $k8s, Deployment => 'nats', { readyReplicas => 1 } );
+  my $status = $comb->reconcile->get;
+  is $status->phase, 'Running', 'Running';
+  is_deeply managed($status), [ {%deployment_nats}, {%web} ], 'recorded';
+  $k8s->clear_calls;
+
+  $comb->parts( [ deployment('nats') ] );
+  $status = $comb->reconcile->get;
+  is $status->phase, 'Running', 'still Running';
+  is_deeply deleted($k8s), [ 'Service/nats' ], 'dropped from the manifests: deleted';
+  is_deeply managed($status), [ {%deployment_nats} ], 'and no longer recorded';
+};
+
+subtest 'a healthy Comb with nothing recorded records what it runs' => sub {
+  my $k8s = Kubernetes::Comb::Client::Fake->new;
+  my $comb = TestComb::Configurable->new(
+    name      => 'nats',
+    namespace => 'platform',
+    k8s       => $k8s,
+    parts     => [ deployment('nats') ]
+  );
+  $comb->deploy->get;
+  set_status( $k8s, Deployment => 'nats', { readyReplicas => 1 } );
+  my $status = $comb->reconcile->get;
+  is $status->phase, 'Running', 'Running';
+  is_deeply managed($status), [ {%deployment_nats} ], 'recorded';
 };
 
 subtest 'a resource the manifests drop is pruned' => sub {

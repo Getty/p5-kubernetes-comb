@@ -59,7 +59,8 @@ k8s upstream => '+Kubernetes::Comb::CRD::CombUpstreamStatus';
 =attr upstream
 
 L<Kubernetes::Comb::CRD::CombUpstreamStatus>, only while an upstream is
-active.
+active -- or its bridge still stands: steps that change nothing carry it
+forward, see L<Kubernetes::Comb/reconcile>.
 
 =cut
 
