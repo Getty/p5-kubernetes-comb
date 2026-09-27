@@ -122,9 +122,11 @@ be resolved. Two clients whose URLs are equal talk to the same cluster.
 
   my $dev = $client->for_context('dev');
 
-A new client of the same class for another kube context from the same
-kubeconfig. Resolving the context is deferred: a missing or broken context
-fails the first request's Future, and makes L</server_url> croak.
+A client of the same class for another kube context from the same
+kubeconfig, made once per context and kept --
+L<Kubernetes::Comb::Upstream::K8s> asks for it on every step. Resolving the
+context is deferred: a missing or broken context fails the first request's
+Future, and makes L</server_url> croak.
 
 =seealso
 

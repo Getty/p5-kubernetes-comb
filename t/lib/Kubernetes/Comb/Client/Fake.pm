@@ -66,6 +66,11 @@ What L</server_url> returns. Default C<https://fake.invalid:6443>.
 
 HashRef of context name to client, returned by L</for_context>.
 
+=item context
+
+What C<context> returns: the name of the kube context, as the real clients
+have it when they were given one. Default C<undef>.
+
 =item crd_class
 
 The Comb CR class to resolve C<Comb> to, default
@@ -83,6 +88,8 @@ has _server_url => (
 );
 
 has contexts => ( is => 'ro', isa => HashRef, default => sub { {} } );
+
+has context => ( is => 'ro', isa => Str, predicate => 1 );
 
 has crd_class => ( is => 'ro', isa => Str, default => 'Kubernetes::Comb::CRD::Comb' );
 

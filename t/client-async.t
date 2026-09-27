@@ -48,6 +48,7 @@ subtest 'built from kubeconfig and context' => sub {
   isa_ok $prod, 'Kubernetes::Comb::Client::Async';
   is $prod->loop, $loop, 'same loop';
   is $prod->server_url, 'https://prod.example:6443', 'other context, other server';
+  is $k8s->for_context('prod'), $prod, 'asking again gives the same client, no second notifier';
 };
 
 subtest 'nothing is thrown' => sub {

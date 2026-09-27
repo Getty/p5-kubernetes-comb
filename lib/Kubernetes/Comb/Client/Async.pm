@@ -160,9 +160,11 @@ The API server URL of L</kube>.
 
 =cut
 
+has _for_context => ( is => 'ro', init_arg => undef, default => sub { {} } );
+
 sub for_context {
   my ( $self, $context ) = @_;
-  return ref($self)->new(
+  return $self->_for_context->{$context} //= ref($self)->new(
     loop => $self->loop,
     ( $self->has_kubeconfig ? ( kubeconfig => $self->kubeconfig ) : () ),
     context => $context
@@ -173,8 +175,10 @@ sub for_context {
 
   my $dev = $k8s->for_context('dev');
 
-A new client on the same L</loop> for another context of the same
-L</kubeconfig> (the default one when none was given). Nothing is read until
+The client on the same L</loop> for another context of the same
+L</kubeconfig> (the default one when none was given), made on first use and
+kept: asking again returns the same one, so the loop gets one more
+L<Net::Async::Kubernetes> per context, not per call. Nothing is read until
 its first request.
 
 =seealso

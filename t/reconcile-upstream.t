@@ -190,11 +190,12 @@ subtest 'answers that do not resolve' => sub {
 subtest 'reconcile with an active upstream' => sub {
   my ( $comb, $k8s ) = comb( class => 'TestComb::Configurable', upstream => sub { '+TestComb::Upstream::Probe' } );
   my $status = $comb->reconcile->get;
-  is $status->phase, 'Error', 'the upstream path is not there yet: Error';
-  is condition( $status, 'Ready' )->reason, 'UpstreamNotImplemented', '... UpstreamNotImplemented';
+  is $status->phase, 'Running', 'the upstream path: borrowed, Running';
+  is condition( $status, 'Ready' )->reason, 'Borrowed', '... Borrowed';
   like condition( $status, 'Ready' )->message, qr/TestComb::Upstream::Probe/, '... naming the upstream';
-  ok !$k8s->calls_of('ensure'), 'nothing deployed locally';
+  ok !$k8s->calls_of('ensure'), 'nothing deployed locally, no endpoints to bridge';
   is_deeply $status->endpoints, [], 'no local endpoints published';
+  is $status->upstream->class, 'TestComb::Upstream::Probe', 'status.upstream names it';
 };
 
 subtest 'resolution is the first step' => sub {

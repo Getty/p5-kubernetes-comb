@@ -199,6 +199,7 @@ YAML
   is $prod->kubeconfig, "$kubeconfig", 'same kubeconfig';
   is $prod->context, 'prod', 'other context';
   is $prod->server_url, 'https://prod.example:6443', 'other server';
+  is $k8s->for_context('prod'), $prod, 'asking again gives the same client';
 
   my $gone = $k8s->for_context('nope');
   my $f = eval { $gone->get( 'Pod', 'x', namespace => 'platform' ) };

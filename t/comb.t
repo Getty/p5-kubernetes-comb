@@ -46,7 +46,7 @@ subtest 'defaults without a custom resource' => sub {
   is_deeply [ $comb->endpoints ], [], 'no endpoints';
   is_deeply [ $comb->manifests ], [], 'no manifests';
   is_deeply [ $comb->check ], [], 'nothing missing';
-  is_deeply [ $comb->bridge_manifests ], [], 'no bridge yet';
+  is_deeply [ $comb->bridge_manifests->get ], [], 'no endpoints, no bridge';
   is $comb->crd_class, 'Kubernetes::Comb::CRD::Comb', 'default crd_class';
   ok !$comb->has_crd, 'no crd';
   ok !$comb->has_resolver, 'no resolver';

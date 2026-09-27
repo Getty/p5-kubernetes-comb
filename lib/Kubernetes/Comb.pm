@@ -12,6 +12,7 @@ use JSON::MaybeXS qw( JSON );
 use Module::Runtime qw( use_module use_package_optimistically );
 use POSIX qw( strftime );
 use Scalar::Util qw( blessed );
+use Socket qw( AF_INET AF_INET6 inet_ntop inet_pton );
 use Types::Standard qw( ArrayRef CodeRef ConsumerOf HashRef InstanceOf Maybe Object Str );
 use Kubernetes::Comb::CRD;
 use Kubernetes::Comb::CRD::Comb;
@@ -233,6 +234,35 @@ deploys. Default C<kubernetes-comb>.
 
 =cut
 
+has context => ( is => 'lazy', isa => Maybe[Str] );
+
+sub _build_context {
+  my ( $self ) = @_;
+  my $k8s = $self->k8s;
+  return $k8s->can('context') ? $k8s->context : undef;
+}
+
+=attr context
+
+The name of the kube context the Comb lives in, as the layers name it. Only
+used to spot an upstream chain that leads back here: an upstream whose
+C<via> names it beyond the first layer is a loop (see L</reconcile>).
+Defaults to the C<context> of L</k8s> when the client was given one, else
+C<undef> -- no loop check.
+
+=cut
+
+has cluster_domain => ( is => 'ro', isa => Str, default => 'cluster.local' );
+
+=attr cluster_domain
+
+The DNS domain of the cluster, default C<cluster.local>. The default
+L</bridge_manifests> appends it to a host ending in C<.svc> before it becomes
+the C<externalName> of a Service: the cluster DNS answers that with a CNAME,
+which a Pod's resolver does not expand with its search domains.
+
+=cut
+
 has io_k8s => ( is => 'lazy', isa => InstanceOf['IO::K8s'] );
 
 sub _build_io_k8s {
@@ -360,14 +390,58 @@ one. Default false. Works as class and as instance method.
 
 =cut
 
-sub bridge_manifests { return }
+sub bridge_manifests {
+  my ( $self, @endpoints ) = @_;
+  my %declared = map { ( $_->{name} => $_ ) } $self->_declared_endpoints;
+  my ( @services, %of );
+  for my $endpoint (@endpoints) {
+    my $declared = $declared{ $endpoint->name } // {};
+    my $service = $declared->{service} // $self->name;
+    push @services, $service unless $of{$service};
+    push @{ $of{$service} }, $endpoint;
+  }
+  my ( @manifests, @problems );
+  for my $service (@services) {
+    my ( $manifests, $problems ) = $self->_bridge_service( $service, @{ $of{$service} } );
+    push @manifests, @$manifests;
+    push @problems, @$problems;
+  }
+  return @problems ? Future->fail( join( '; ', @problems ), 'bridge' ) : Future->done(@manifests);
+}
 
 =method bridge_manifests
 
-  my @manifests = $comb->bridge_manifests(@upstream_endpoints);
+  my @manifests = $comb->bridge_manifests(@endpoints)->get;
 
 The resources that make the upstream reachable under the local names while an
-upstream is active. Default: none yet.
+upstream is active: for each Service the Comb would have locally, the one
+that points at the upstream instead, so consumers keep using
+C<E<lt>serviceE<gt>:E<lt>portE<gt>>. Called with the redirected endpoints
+(L<Kubernetes::Comb::Endpoint>), whose C<cluster> is the upstream address to
+point at; returns the manifests, or a Future of them. Override it when the
+service needs more. A Future that fails with category C<bridge> says the
+upstream cannot be bridged -- L</reconcile> reports that as C<Blocked> and
+deploys nothing -- any other failure is an C<Error>.
+
+The default groups the endpoints by their Service (C<service> of
+L</endpoints>, default L</name>), each port named after its endpoint:
+
+=over
+
+=item * all host names: a Service of type C<ExternalName>. It cannot map
+ports, so an upstream port that differs from the local one, or endpoints
+pointing at different hosts, cannot be bridged. A host ending in C<.svc>
+gets L</cluster_domain> appended.
+
+=item * all IP addresses of one family: a selector-less Service
+(C<ipFamilies> that family) plus an C<EndpointSlice> per address
+(C<discovery.k8s.io/v1>, C<kubernetes.io/service-name> label), which may
+point at another port.
+
+=item * a mix of names and addresses, or of IPv4 and IPv6: cannot be
+bridged.
+
+=back
 
 =cut
 
@@ -551,29 +625,64 @@ message.
 
 L</check> reports missing prerequisites: C<NeedsConfig>.
 
-=item 5. Local
+=item 5a. Local
 
-L</status> healthy: C<Running>. Otherwise L</deploy>, then prune: every
-resource this Comb recorded in C<managedResources> that it no longer
-renders -- compared by group, kind, namespace and name, so a new API version
-is no orphan -- is deleted if it still carries L</label_selector>. One that
-lost the label is left alone and dropped from the record, one that is gone
-is dropped, one that fails to delete stays for the next step. Then
-C<Pending>. A deploy that fails half-way is an C<Error> that records what it
-applied on top of the previous record, and prunes nothing. A reconcile after
-L</stop> deploys again, which scales the workloads back up.
+Without an upstream. L</status> healthy: C<Running>. Otherwise L</deploy>,
+then prune: every resource this Comb recorded in C<managedResources> that it
+no longer renders -- compared by group, kind, namespace and name, so a new
+API version is no orphan -- is deleted if it still carries
+L</label_selector>. One that lost the label is left alone and dropped from
+the record, one that is gone is dropped, one that fails to delete stays for
+the next step. Then C<Pending>. A deploy that fails half-way is an C<Error>
+that records what it applied on top of the previous record, and prunes
+nothing. A reconcile after L</stop> deploys again, which scales the
+workloads back up. The first step after borrowing from an upstream deploys
+even when L</status> looks healthy, since the bridge may stand where the
+local resources belong.
 
-With an active upstream: not implemented yet, an C<Error>.
+=item 5b. Upstream
+
+With an active upstream (see L<Kubernetes::Comb::Role::Upstream>), the Comb
+runs nothing of its own and borrows the service instead:
+
+=over
+
+=item * The upstream's C<status>. Not reachable: C<Blocked> with its
+message. A C<via> that names L</context> beyond the first layer is a loop:
+C<Blocked>, the recorded C<via> cut after that entry.
+
+=item * The upstream's C<endpoints>, matched by name to L</endpoints>: each
+declared endpoint gets the upstream's C<cluster> address (else its
+C<external> one) and C<external> -- the redirected endpoints, which
+L</endpoint> returns and C<status.endpoints> publishes. One the upstream has
+no address for: C<Blocked>.
+
+=item * L</bridge_manifests> for the redirected endpoints. A bridge that
+cannot be: C<Blocked>, nothing deployed.
+
+=item * C<replicate_into>, when the upstream has it. A failure: C<Error>.
+
+=item * The bridge is deployed and pruned as the manifests are in the local
+path, so the local workloads go and a local Service of a bridged name is
+changed in place. Then C<Running> when the upstream is C<Running>, else
+C<Pending> with its phase.
+
+=back
+
+A failing C<status> or C<endpoints>, an answer that is none, or a bridge that
+does not render: C<Error>. Whatever the upstream's C<status> said is
+recorded in C<status.upstream>.
 
 =item 6. Record
 
-Phase, conditions, the resolved endpoints (while local),
-C<managedResources> (carried forward by the steps that do not deploy) and
-C<observedGeneration> go through C<update_status> into L</crd>, which is
-replaced by what the API server returns; without a custom resource the
-status is kept in memory. A failed write is retried once on a freshly read
-custom resource; if that fails too the status is kept in memory and carries
-a C<StatusWritten> condition that says why.
+Phase, conditions, the resolved endpoints -- the redirected ones while
+borrowing, once they are known --, C<status.upstream> while an upstream is
+active, C<managedResources> (carried forward by the steps that do not
+deploy) and C<observedGeneration> go through C<update_status> into L</crd>,
+which is replaced by what the API server returns; without a custom resource
+the status is kept in memory. A failed write is retried once on a freshly
+read custom resource; if that fails too the status is kept in memory and
+carries a C<StatusWritten> condition that says why.
 
 =back
 
@@ -607,14 +716,9 @@ Manifests that do not render fail it with category C<manifests>.
 sub status {
   my ( $self ) = @_;
   return Future->call( sub {
-    $self->_render->then( sub {
-      my @items = @_;
-      return Future->done( $self->_status_of( \@items, [] ) ) unless @items;
-      return $self->_fetch_live(@items)->then( sub {
-        return Future->done( $self->_status_of( \@items, [] ) )
-          unless grep { $_->{workload} && $_->{live} } @items;
-        return $self->_pods->then( sub { Future->done( $self->_status_of( \@items, [@_] ) ) } );
-      } );
+    $self->_resolve_upstream->then( sub {
+      my ( $upstream ) = @_;
+      return $upstream ? $self->_borrowed_status($upstream) : $self->_local_status;
     } );
   } );
 }
@@ -644,6 +748,14 @@ C<PodScheduled=False> make up the reasons and messages; a reason that does not
 pass by waiting (C<CrashLoopBackOff>, C<ImagePullBackOff>, a failed Job, a
 failed Pod of its own) makes the phase C<Error>. Completed Pods never count
 against the Comb; a failed Pod that belongs to a controller is left to it.
+
+With an active upstream (resolved as in L</reconcile>) the Comb runs no
+Pods; the status is that of the borrowed service instead, with C<pods> empty
+and an C<upstream> key holding what C<status.upstream> would. C<Running>:
+the upstream is reachable and C<Running> and every resource of the bridge
+(L</bridge_manifests>) exists. C<Pending> or C<NotDeployed> while that is
+not so; C<Blocked> or C<Error> where L</reconcile> would stop with that
+phase.
 
 =cut
 
@@ -786,7 +898,9 @@ sub endpoint {
   my $ep = $comb->endpoint('client')->get;
 
 Future of the L<Kubernetes::Comb::Endpoint> of that name, with its resolved
-addresses. Fails for a name the Comb does not offer.
+addresses. Fails for a name the Comb does not offer. With an active upstream
+the addresses are the redirected ones (see L</reconcile>), and it fails with
+the reason when the upstream offers none.
 
 =cut
 
@@ -924,6 +1038,52 @@ sub _apply {
       }
     );
   } foreach => \@items, concurrent => 1 )->then( sub { Future->done(@applied) } );
+}
+
+# What status says of a Comb that runs its own resources.
+sub _local_status {
+  my ( $self ) = @_;
+  return Future->call( sub {
+    $self->_render->then( sub {
+      my @items = @_;
+      return Future->done( $self->_status_of( \@items, [] ) ) unless @items;
+      return $self->_fetch_live(@items)->then( sub {
+        return Future->done( $self->_status_of( \@items, [] ) )
+          unless grep { $_->{workload} && $_->{live} } @items;
+        return $self->_pods->then( sub { Future->done( $self->_status_of( \@items, [@_] ) ) } );
+      } );
+    } );
+  } );
+}
+
+# What status says of a Comb that borrows from $upstream.
+sub _borrowed_status {
+  my ( $self, $upstream ) = @_;
+  return $self->_observe_upstream($upstream)->then( sub {
+    my ( $o ) = @_;
+    my %upstream = ( upstream => $self->_upstream_record($o) );
+    if ( my $stop = $o->{stop} ) {
+      my ( $phase, $reason, $message ) = @$stop;
+      return Future->done( {
+        %{ $self->_verdict( $phase, [ { severity => 'error', reason => $reason, message => $message } ], [] ) },
+        %upstream
+      } );
+    }
+    my @items = @{ $o->{items} };
+    return $self->_fetch_live(@items)->then( sub {
+      my @problems = map { +{
+        severity => 'pending',
+        reason   => 'ResourcesMissing',
+        message  => $_->{kind}.' '.$_->{name}.' is missing'
+      } } grep { !$_->{live} } @items;
+      my ( $phase, $reason, $message ) = $self->_borrowed_verdict($o);
+      push @problems, { severity => 'pending', reason => $reason, message => $message } if $phase ne 'Running';
+      $phase = !@problems                               ? 'Running'
+             : @items && !grep( { $_->{live} } @items ) ? 'NotDeployed'
+             :                                            'Pending';
+      return Future->done( { %{ $self->_verdict( $phase, \@problems, [] ) }, %upstream } );
+    } );
+  } );
 }
 
 # Puts the live object (or undef) of every item into $item->{live}: one list
@@ -1193,11 +1353,26 @@ sub _delete_job {
   return sub { $self->k8s->delete( $_[0] ) };
 }
 
+# The endpoints as they are reached now: the local ones, or with an active
+# upstream the redirected ones -- failing with the reason when there are
+# none.
 sub _resolve_endpoints {
   my ( $self ) = @_;
   return Future->call( sub {
-    Future->done( map { $self->_local_endpoint($_) } $self->_declared_endpoints );
+    $self->_resolve_upstream->then( sub {
+      my ( $upstream ) = @_;
+      return Future->done( $self->_local_endpoints ) unless $upstream;
+      return $self->_observe_upstream($upstream)->then( sub {
+        my ( $o ) = @_;
+        return $o->{endpoints} ? Future->done( @{ $o->{endpoints} } ) : Future->fail( $o->{stop}[2] );
+      } );
+    } );
   } );
+}
+
+sub _local_endpoints {
+  my ( $self ) = @_;
+  return map { $self->_local_endpoint($_) } $self->_declared_endpoints;
 }
 
 sub _local_endpoint {
@@ -1248,6 +1423,287 @@ sub _declared_endpoints {
 sub _endpoint_names {
   my ( $self ) = @_;
   return map { $_->{name} } $self->_declared_endpoints;
+}
+
+####
+#### Upstream and bridge internals
+####
+
+# The upstream path up to the bridge, shared by reconcile, status and the
+# endpoints: Future of { upstream, seen (what its status said), via,
+# endpoints (redirected), items (the bridge, ready to apply) } as far as it
+# got, and where it cannot go on stop => [ phase, reason, message ]. Never
+# fails.
+sub _observe_upstream {
+  my ( $self, $upstream ) = @_;
+  my %o = ( upstream => $upstream );
+  my $stop = sub {
+    my ( $phase, $reason, $message ) = @_;
+    return Future->fail( $message, stop => $phase, $reason );
+  };
+  return $self->_hook( sub { $upstream->status( $_[0] ) } )->then(
+    sub {
+      my ( $seen ) = @_;
+      return $stop->( Error => UpstreamFailed => ref($upstream).'->status answered '
+        .( ref $seen || 'a plain scalar' ).', not a hashref' ) unless ref $seen eq 'HASH';
+      $o{seen} = $seen;
+      my $via = $seen->{via} // [];
+      return $stop->( Error => UpstreamFailed => ref($upstream).'->status answered a via that is no arrayref' )
+        unless ref $via eq 'ARRAY';
+      # Beyond the first layer -- which may well be this context, another
+      # namespace -- this context means the chain came back here. Cut there,
+      # so a loop records the same via every step instead of a growing one.
+      my @via = @$via;
+      my $own = $self->context;
+      my ( $back ) = defined $own ? grep { defined $via[$_] && $via[$_] eq $own } 1 .. $#via : ();
+      splice @via, $back + 1 if defined $back;
+      $o{via} = \@via;
+      my $label = $self->_upstream_label( \%o );
+      return $stop->( Blocked => UpstreamUnreachable => $label.' is unreachable'.$self->_upstream_says( $seen, ': ' ) )
+        unless $seen->{reachable};
+      return $stop->( Blocked => UpstreamLoop => $label.' leads back to context '.$own.': via '.join( ', ', @via ) )
+        if defined $back;
+      return $self->_hook( sub { $upstream->endpoints( $_[0] ) } )->else( sub {
+        $stop->( Error => UpstreamFailed => 'reading the endpoints of '.$label.' failed: '.$self->_message( $_[0] ) );
+      } );
+    },
+    sub {
+      $stop->( Error => UpstreamFailed => 'reading the status of '.ref($upstream).' failed: '.$self->_message( $_[0] ) );
+    }
+  )->then( sub {
+    my @offered = @_ == 1 && ref $_[0] eq 'ARRAY' ? @{ $_[0] } : @_;
+    my @wrong = grep { !( blessed $_ && $_->isa('Kubernetes::Comb::Endpoint') ) } @offered;
+    return $stop->( Error => UpstreamFailed => ref($upstream).'->endpoints answered '
+      .( ref $wrong[0] || 'a plain scalar' ).', not a Kubernetes::Comb::Endpoint' ) if @wrong;
+    my ( $redirected, $missing ) = $self->_redirect(@offered);
+    if (@$missing) {
+      my $phase = $o{seen}{phase};
+      return $stop->( Blocked => UpstreamEndpointsMissing => $self->_upstream_label( \%o )
+        .' offers no reachable address for endpoint(s) '.join( ', ', @$missing )
+        .( defined $phase && $phase ne 'Running' ? ' (it is '.$phase.')' : '' )
+        .$self->_upstream_says( $o{seen}, '; ' ) );
+    }
+    $o{endpoints} = $redirected;
+    return $self->_hook( bridge_manifests => @$redirected )
+      ->then( sub { Future->done( $self->_items(@_) ) } )
+      ->else( sub {
+        my ( $error, $category ) = @_;
+        return $stop->( Blocked => BridgeImpossible => 'the upstream cannot be bridged: '.$self->_message($error) )
+          if ( $category // '' ) eq 'bridge';
+        return $stop->( Error => BridgeFailed => 'rendering the bridge failed: '.$self->_message($error) );
+      } );
+  } )->then(
+    sub {
+      $o{items} = [@_];
+      return Future->done( \%o );
+    },
+    sub {
+      my ( $message, $category, $phase, $reason ) = @_;
+      $o{stop} = ( $category // '' ) eq 'stop'
+        ? [ $phase, $reason, $message ]
+        : [ Error => UpstreamFailed => 'borrowing from '.ref($upstream).' failed: '.$self->_message($message) ];
+      return Future->done( \%o );
+    }
+  );
+}
+
+# The declared endpoints, each with the address of the upstream's endpoint
+# of that name: ( [ redirected ], [ names the upstream has no address for ] ).
+sub _redirect {
+  my ( $self, @offered ) = @_;
+  my %offered = map { ( $_->name => $_ ) } @offered;
+  my ( @redirected, @missing );
+  for my $declared ( $self->_declared_endpoints ) {
+    my $upstream = $offered{ $declared->{name} };
+    my $address = !$upstream        ? undef
+                : $upstream->has_cluster  ? $upstream->cluster
+                : $upstream->has_external ? $upstream->external
+                :                           undef;
+    unless ( defined $address && length $address ) {
+      push @missing, $declared->{name};
+      next;
+    }
+    my ( $host, $port ) = $self->_split_address($address);
+    $address = $self->_join_address( $host, $upstream->port ) if defined $host && !defined $port;
+    push @redirected, $self->endpoint_class->new(
+      name    => $declared->{name},
+      port    => $declared->{port},
+      ( defined $declared->{protocol} ? ( protocol => $declared->{protocol} ) : () ),
+      cluster => $address,
+      ( $upstream->has_external ? ( external => $upstream->external ) : () )
+    );
+  }
+  return ( \@redirected, \@missing );
+}
+
+sub _upstream_label {
+  my ( $self, $o ) = @_;
+  my $context = $o->{seen} ? $o->{seen}{context} : undef;
+  return 'upstream '.ref( $o->{upstream} ).( defined $context ? ' (context '.$context.')' : '' );
+}
+
+# The message of the upstream status, behind $glue; else nothing.
+sub _upstream_says {
+  my ( $self, $seen, $glue ) = @_;
+  my $message = $seen ? $seen->{message} : undef;
+  return defined $message && length $message ? $glue.$message : '';
+}
+
+# Phase, reason and message of a bridge that is in place: Running when the
+# upstream is, else Pending.
+sub _borrowed_verdict {
+  my ( $self, $o ) = @_;
+  my $label = $self->_upstream_label($o);
+  my $phase = $o->{seen}{phase};
+  return ( Running => Borrowed => 'borrowed from '.$label
+    .( @{ $o->{via} } ? ' via '.join( ', ', @{ $o->{via} } ) : '' ) )
+    if defined $phase && $phase eq 'Running';
+  return ( Pending => UpstreamNotRunning => $label.' is '.( defined $phase ? $phase : 'in no known phase' )
+    .$self->_upstream_says( $o->{seen}, ': ' ) );
+}
+
+# status.upstream as far as the upstream answered.
+sub _upstream_record {
+  my ( $self, $o ) = @_;
+  my $seen = $o->{seen} // {};
+  return {
+    class      => ref $o->{upstream},
+    ( defined $seen->{context} ? ( context   => ''.$seen->{context} )                          : () ),
+    ( exists $seen->{reachable} ? ( reachable => $seen->{reachable} ? JSON->true : JSON->false ) : () ),
+    ( defined $seen->{phase}   ? ( phase     => ''.$seen->{phase} )                            : () ),
+    ( $o->{via}                ? ( via       => [ map { ''.$_ } @{ $o->{via} } ] )             : () ),
+    observedAt => $self->_now
+  };
+}
+
+# The bridge of one Service: ( [ manifests ], [ why it cannot be ] ).
+sub _bridge_service {
+  my ( $self, $service, @endpoints ) = @_;
+  my ( @targets, @problems );
+  for my $endpoint (@endpoints) {
+    my $address = $endpoint->has_cluster ? $endpoint->cluster : undef;
+    my ( $host, $port ) = defined $address ? $self->_split_address($address) : ();
+    unless ( defined $host && defined $port ) {
+      push @problems, 'endpoint '.$endpoint->name.' has '
+        .( defined $address ? 'the address '.$address.', not host:port' : 'no address' );
+      next;
+    }
+    my ( $family, $ip ) = $self->_ip_address($host);
+    push @targets, {
+      endpoint => $endpoint,
+      host     => $family ? $ip : lc $host,
+      port     => $port,
+      family   => $family
+    };
+  }
+  return ( [], \@problems ) if @problems;
+  my %families = map { ( $_->{family} => 1 ) } @targets;
+  if ( keys %families > 1 ) {
+    my $what = $families{''} ? 'host names and IP addresses' : 'IPv4 and IPv6 addresses';
+    return ( [], [ 'Service '.$service.': its endpoints point at both '.$what.' ('
+      .join( ', ', map { $_->{endpoint}->name.' at '.$_->{host} } @targets ).'), one Service cannot bridge both' ] );
+  }
+  my @ports = map { +{
+    name     => $_->{endpoint}->name,
+    port     => $_->{endpoint}->port,
+    protocol => $self->_service_protocol( $_->{endpoint}->protocol )
+  } } @targets;
+  return $families{''}
+    ? $self->_bridge_external_name( $service, \@ports, @targets )
+    : $self->_bridge_endpoint_slices( $service, \@ports, @targets );
+}
+
+sub _bridge_external_name {
+  my ( $self, $service, $ports, @targets ) = @_;
+  my @problems;
+  my %hosts = map { ( $_->{host} => 1 ) } @targets;
+  push @problems, 'Service '.$service.': an ExternalName Service points at one host, but its endpoints are at '
+    .join( ', ', map { $_->{endpoint}->name.' at '.$_->{host} } @targets ) if keys %hosts > 1;
+  push @problems, map {
+    'Service '.$service.': endpoint '.$_->{endpoint}->name.' is port '.$_->{endpoint}->port.' here but '
+      .$_->{port}.' at '.$_->{host}.', and an ExternalName Service cannot map ports'
+  } grep { $_->{port} != $_->{endpoint}->port } @targets;
+  return ( [], \@problems ) if @problems;
+  my $host = $targets[0]{host};
+  $host .= '.'.$self->cluster_domain if $host =~ /\.svc\z/;
+  return ( [ {
+    apiVersion => 'v1',
+    kind       => 'Service',
+    metadata   => { name => $service },
+    spec       => { type => 'ExternalName', externalName => $host, ports => $ports }
+  } ], [] );
+}
+
+# A selector-less Service, and one EndpointSlice per address: the endpoints
+# of a slice serve all its ports.
+sub _bridge_endpoint_slices {
+  my ( $self, $service, $ports, @targets ) = @_;
+  my $family = $targets[0]{family};
+  my ( @addresses, %ports_at );
+  for my $target (@targets) {
+    push @addresses, $target->{host} unless $ports_at{ $target->{host} };
+    push @{ $ports_at{ $target->{host} } }, {
+      name     => $target->{endpoint}->name,
+      port     => $target->{port},
+      protocol => $self->_service_protocol( $target->{endpoint}->protocol )
+    };
+  }
+  my $n = 0;
+  return ( [
+    {
+      apiVersion => 'v1',
+      kind       => 'Service',
+      metadata   => { name => $service },
+      spec       => { ipFamilies => [ $family ], ipFamilyPolicy => 'SingleStack', ports => $ports }
+    },
+    map { +{
+      apiVersion  => 'discovery.k8s.io/v1',
+      kind        => 'EndpointSlice',
+      metadata    => {
+        name   => $service.'-'.++$n,
+        labels => {
+          'kubernetes.io/service-name'             => $service,
+          'endpointslice.kubernetes.io/managed-by' => $self->managed_by
+        }
+      },
+      addressType => $family,
+      ports       => $ports_at{$_},
+      endpoints   => [ { addresses => [ $_ ] } ]
+    } } @addresses
+  ], [] );
+}
+
+sub _service_protocol {
+  my ( $self, $protocol ) = @_;
+  my $upper = uc( $protocol // 'tcp' );
+  return $upper eq 'UDP' || $upper eq 'SCTP' ? $upper : 'TCP';
+}
+
+# host:port, [v6]:port, or either without the port: ( host, port or undef );
+# nothing for what is none of these.
+sub _split_address {
+  my ( $self, $address ) = @_;
+  return ( $1, $2 ) if $address =~ /\A\[([^\[\]\s]+)\](?::(\d+))?\z/;
+  return ( $1, $2 ) if $address =~ /\A([^:\[\]\s]+)(?::(\d+))?\z/;
+  my ( $family ) = $self->_ip_address($address);
+  return ( $address, undef ) if $family eq 'IPv6';
+  return;
+}
+
+sub _join_address {
+  my ( $self, $host, $port ) = @_;
+  my ( $family ) = $self->_ip_address($host);
+  return ( $family eq 'IPv6' ? '['.$host.']' : $host ).':'.$port;
+}
+
+# ( IPv4 or IPv6, the address in canonical form ), or ( '' ) for a host name.
+sub _ip_address {
+  my ( $self, $host ) = @_;
+  for my $family ( [ IPv4 => AF_INET ], [ IPv6 => AF_INET6 ] ) {
+    my $packed = inet_pton( $family->[1], $host );
+    return ( $family->[0], inet_ntop( $family->[1], $packed ) ) if defined $packed;
+  }
+  return ('');
 }
 
 ####
@@ -1395,10 +1851,13 @@ sub _reconcile_local {
   my $manifests_failed = sub {
     $self->_finish( $r, Error => ManifestsFailed => 'rendering the manifests failed: '.$self->_message( $_[0] ) );
   };
-  return $self->status->then(
+  # After borrowing, the bridge may stand where the local resources belong,
+  # and look healthy: deploy anyway.
+  my $borrowed = $r->{previous} && $r->{previous}->upstream;
+  return $self->_local_status->then(
     sub {
       my ( $live ) = @_;
-      return $self->_finish( $r, Running => Healthy => 'healthy' ) if $live->{healthy};
+      return $self->_finish( $r, Running => Healthy => 'healthy' ) if $live->{healthy} && !$borrowed;
       return $self->_render->then( sub { $self->_deploy_and_prune( $r, $live, @_ ) }, $manifests_failed );
     },
     sub {
@@ -1411,15 +1870,46 @@ sub _reconcile_local {
 
 # Step 5b, the upstream path: upstream status and endpoints, replicate_into,
 # the bridge; it fills phase, managed, endpoints and upstream_status of $r.
-# Not implemented yet.
 sub _reconcile_upstream {
   my ( $self, $r ) = @_;
-  return $self->_finish( $r, Error => UpstreamNotImplemented => 'the upstream '.ref( $r->{upstream} )
-    .' is active, but borrowing from an upstream is not implemented yet' );
+  my $upstream = $r->{upstream};
+  return $self->_observe_upstream($upstream)->then( sub {
+    my ( $o ) = @_;
+    $r->{upstream_status} = $self->_upstream_record($o);
+    $r->{endpoints} = $o->{endpoints} if $o->{endpoints};
+    return $self->_finish( $r, @{ $o->{stop} } ) if $o->{stop};
+    my $replicated = $upstream->can('replicate_into')
+      ? $self->_hook( sub { $upstream->replicate_into( $_[0] ) } )
+      : Future->done;
+    return $replicated->then(
+      sub {
+        $self->_apply_and_prune( $r, sub {
+          my ( $phase, $reason, $message ) = $self->_borrowed_verdict($o);
+          return $self->_finish( $r, $phase, $reason, join '; ', $message, @_ );
+        }, @{ $o->{items} } );
+      },
+      sub {
+        $self->_finish( $r, Error => ReplicationFailed => 'replicating from '.$self->_upstream_label($o)
+          .' failed: '.$self->_message( $_[0] ) );
+      }
+    );
+  } );
 }
 
 sub _deploy_and_prune {
   my ( $self, $r, $live, @items ) = @_;
+  my $state = $live->{healthy} ? 'in place of the bridge'
+            : 'not healthy yet'.( $live->{phase} ne 'NotDeployed' && $live->{message} ? ' ('.$live->{message}.')' : '' );
+  return $self->_apply_and_prune( $r, sub {
+    $self->_finish( $r, Pending => Deployed => join '; ', 'applied '.scalar(@items).' resource(s), '.$state, @_ );
+  }, @items );
+}
+
+# Applies the items, then prunes what the record has and they do not; sets
+# managed of $r. $done gets the notes of the pruning and finishes $r; a
+# failed apply finishes it as Error.
+sub _apply_and_prune {
+  my ( $self, $r, $done, @items ) = @_;
   my @previous = $self->_previous_resources($r);
   my @desired  = map { $self->_resource_of($_) } @items;
   return $self->_apply(@items)->then(
@@ -1428,11 +1918,7 @@ sub _deploy_and_prune {
       return $self->_prune( grep { !$desired{ $self->_resource_key($_) } } @previous )->then( sub {
         my @pruned = @_;
         $r->{managed} = $self->_union( \@desired, [ map { $_->{resource} } grep { $_->{keep} } @pruned ] );
-        my $waiting = $live->{phase} ne 'NotDeployed' && $live->{message} ? ' ('.$live->{message}.')' : '';
-        return $self->_finish( $r, Pending => Deployed => join '; ',
-          'applied '.scalar(@items).' resource(s), not healthy yet'.$waiting,
-          map { $_->{note} // () } @pruned
-        );
+        return $done->( map { $_->{note} // () } @pruned );
       } );
     },
     sub {
@@ -1615,7 +2101,7 @@ sub _checked_upstream {
 sub _publish_endpoints {
   my ( $self, $r ) = @_;
   return Future->done($r) if $r->{endpoints} || !exists $r->{upstream} || defined $r->{upstream};
-  return $self->_resolve_endpoints->then(
+  return Future->call( sub { Future->done( $self->_local_endpoints ) } )->then(
     sub {
       $r->{endpoints} = [@_];
       return Future->done($r);

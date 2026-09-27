@@ -122,9 +122,11 @@ The API server URL of L</rest>.
 
 =cut
 
+has _for_context => ( is => 'ro', init_arg => undef, default => sub { {} } );
+
 sub for_context {
   my ( $self, $context ) = @_;
-  return ref($self)->new(
+  return $self->_for_context->{$context} //= ref($self)->new(
     ( $self->has_kubeconfig ? ( kubeconfig => $self->kubeconfig ) : () ),
     context => $context
   );
@@ -134,8 +136,9 @@ sub for_context {
 
   my $dev = $k8s->for_context('dev');
 
-A new client for another context of the same L</kubeconfig> (the default one
-when none was given). Nothing is read until its first request.
+The client for another context of the same L</kubeconfig> (the default one
+when none was given), made on first use and kept: asking again returns the
+same one. Nothing is read until its first request.
 
 =seealso
 
