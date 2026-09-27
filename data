@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-09-27T16:33:23Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T16:33:23Z
+created: 2026-09-27T04:26:19Z
+depends_on:
+- 7
+- 8
+- 9
+id: 10
+priority: medium
+started: 2026-09-27T16:33:23Z
+status: done
+tags:
+- release
+title: README, Changes, pre-release audit (no release)
+updated: 2026-09-27T16:33:23Z
+---
+
+README reflects the implemented dist (no longer "design phase"). Changes entry for the first release. Audit: cpanfile requires/recommends match SPEC §13 and are pinned to released CPAN versions, dzil build clean. Never run a release or upload.
+
+2026-09-27 16:33 Committed e9b04ec: README.md rewritten (Description, Synopsis, Installation incl. optional async deps, See Also), Changes {{$NEXT}} expanded into a grouped first-release entry from git log. prove -lr t/: 22 files, 214 tests, PASS, unit mode. dzil build: clean (build dir removed, not committed). dzil test: 24 files, 232 tests incl. author-pod-syntax, PASS, unit mode.
+
+2026-09-27 16:33 Audit: cpanfile requires (Future, IO::K8s 1.108, JSON::MaybeXS, Kubernetes::REST 1.108, Module::Runtime, Moo, namespace::autoclean, Path::Tiny, Types::Common::Numeric, Types::Standard) all used in lib/, alphabetical, nothing unused/missing; test-phase Test::More sufficient, everything else t/ uses (incl. t/lib, t/integration, t/examples.t) already a hard require or core. IO::K8s/Kubernetes::REST pinned 1.108 = cpanm --info released version, matches. recommends Future::AsyncAwait/IO::Async ok. NEEDS MAINTAINER DECISION: recommends Net::Async::Kubernetes '0.009' -- cpanm --info shows CPAN release is still 0.008; 0.009 is only the unreleased $VERSION in ~/dev/p5-net-async-kubernetes, needed by Client::Async for ensure/update_status/patch_status. Either release Net::Async::Kubernetes 0.009 first, or knowingly accept the recommend pinned ahead of CPAN until then.
+
+2026-09-27 16:33 Rest of audit ok: all 18 lib/**.pm carry our $VERSION = '0.001' (next unreleased, no CPAN release/tag exists yet) and # ABSTRACT; dist.ini copyright_year 2026 = current, LICENSE matches (Perl_5, same copyright holder/year); CI workflow (.github/workflows/ci.yml) sane, matrix 5.36/5.38/5.40 via shared Getty dzil-test action, no site-specific hacks. No blockers besides the Net::Async::Kubernetes version decision above.
