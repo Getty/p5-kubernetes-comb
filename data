@@ -1,0 +1,33 @@
+---
+claimed_at: 2026-09-27T06:25:02Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T06:25:02Z
+created: 2026-09-27T04:25:58Z
+depends_on:
+- 4
+id: 5
+priority: high
+started: 2026-09-27T06:25:02Z
+status: done
+tags:
+- upstream
+- bridge
+title: 'Upstreams and the bridge: Role::Upstream, Upstream::Static, Upstream::K8s,
+  bridge_manifests'
+updated: 2026-09-27T06:25:02Z
+---
+
+SPEC §5, §7 5b + "The bridge", §8. Role::Upstream requires status (Future -> {reachable, phase, via, ...}) and endpoints (Future -> [Endpoint]); optional replicate_into($comb). Upstream::Static: fixed endpoints, no cluster (Docker, vendors, tests), optional phase/via. Upstream::K8s: read-only get of the peer Comb CR in another kube context (context; namespace and name default to the own ones); client for that context built like the Comb own client (sync or async); missing/inaccessible context or missing CR -> reachable false with reason, never an exception; cluster address when both contexts point at the same API server, else external; none -> unreachable; via = [context, @peer status.upstream.via]. reconcile 5b: upstream status + endpoints, optional replicate_into, bridge_manifests -> deploy -> prune (local resources no longer rendered get pruned); bridge ok AND upstream Running -> Running; reachable but not Running -> Pending with reason; unreachable -> Blocked with reason; status.upstream and status.endpoints (resolved, redirected) written; endpoint($name) returns the redirected address. Bridge per endpoint: hostname -> Service type ExternalName; IP (v4 and v6) -> selector-less Service + EndpointSlice (discovery.k8s.io/v1, label kubernetes.io/service-name). Corners: ExternalName cannot remap ports - if the upstream port differs from the local port, never deploy a silently broken bridge (report it); switching a local ClusterIP Service named like the endpoint to ExternalName must work (same name in both sets, updated in place, no clusterIP carried over); a via chain containing this Comb own context is a loop -> Blocked. The CR only ever holds the fully qualified upstream class name.
+
+2026-09-27 06:02 Started: baseline prove -lr t/ green (unit mode, 16 files/133 tests). Reading SPEC §5/§7/§8 + Comb.pm hand-off.
+
+2026-09-27 06:19 Implemented: Role::Upstream (status/endpoints/replicate_into take the Comb as argument), Upstream::Static, Upstream::K8s, default bridge_manifests (ExternalName / selector-less Service + EndpointSlice), reconcile 5b, upstream-aware status/healthy/endpoint. Tests written (t/bridge.t, t/upstream-static.t, t/upstream-k8s.t, t/reconcile-borrow.t). Waiting on loadguard (memory pressure) to run prove.
+
+2026-09-27 06:21 Decisions: (1) Upstream methods get the Comb as argument: status($comb)/endpoints($comb)/replicate_into($comb); constructor args = CR keys only. (2) Redirected endpoint = declared name/port/protocol, cluster = upstream's cluster//external (the address reachable from this cluster, what the bridge points at), external = upstream's external. (3) Loop rule deviates from the card: own context at via[0] is NOT a loop (same context, other namespace = the SPEC same-API-server case, would otherwise Block the main use case); own context at via[1..] is, and the recorded via is cut there so mutual loops converge instead of growing. Own context = new Comb attr 'context', default k8s->context when the client has one (not added to Role::Client: a Moo 'has' after 'with' cannot satisfy requires). (4) New Comb attr cluster_domain (default cluster.local): ExternalName to <svc>.<ns>.svc does not resolve via CoreDNS (CNAME target not search-expanded); alternative is publishing FQDN cluster addresses = SPEC §6 decision. (5) bridge_manifests default returns a Future; failing with category 'bridge' = Blocked BridgeImpossible (port remap on ExternalName, several hosts, host/IP mix, IPv4/IPv6 mix), other failure = Error. IP bridge sets ipFamilies [family] SingleStack + endpointslice.kubernetes.io/managed-by=managed_by, one slice per address. (6) status/healthy made upstream-aware (beyond the card's list): without it a borrowing Comb is never healthy and SPEC §6/§11 (nats dependsOn db, db replicated) stays Blocked. (7) for_context memoized in Client::Sync/Async: Async added one Net::Async::Kubernetes to the loop per call, Upstream::K8s calls it every step. (8) No UpstreamReady condition: Ready reason (Borrowed, UpstreamNotRunning, UpstreamUnreachable, UpstreamLoop, UpstreamEndpointsMissing, BridgeImpossible, UpstreamFailed, BridgeFailed, ReplicationFailed) + status.upstream carry it.
+
+2026-09-27 06:21 Also found (not changed): (a) k4: an orphan whose delete failed stays in managedResources, but a healthy local step never prunes, so 'stays for the next step' only holds if that step deploys. (b) public deploy on a borrowing Comb still applies the local manifests (next reconcile prunes them) - should it deploy the bridge? (c) switching a Service to a bridge of the other IP family fails on the API server (primary ipFamily immutable) - loud DeployFailed, needs a manual delete; fake does not model it. (d) the fake does not model clusterIP allocation: tests assert the sent manifest carries no clusterIP/selector; that the API server then drops the clusterIP relies on its patchAllocatedValues (only when both types need one) - worth an integration check in k8, as is controller-managed EndpointSlice cleanup after the selector goes. (e) without a known own context a loop's via grows by one round per step (no cap added). No new IO::K8s/Kubernetes::REST/Net::Async::Kubernetes gaps.
+
+2026-09-27 06:21 Done: Role::Upstream finished, Upstream::Static + Upstream::K8s added, default bridge_manifests, reconcile 5b replaces the UpstreamNotImplemented stub, status/healthy/endpoint/describe follow an active upstream, for_context memoized in Sync/Async, fake client got 'context'. Verified: prove -lr t/ green in unit mode (20 files, 173 tests; TEST_KUBERNETES_COMB_* never set, integration not run). New tests: t/bridge.t, t/upstream-static.t, t/upstream-k8s.t, t/reconcile-borrow.t; t/reconcile-upstream.t 'reconcile with an active upstream' claim replaced (Error UpstreamNotImplemented -> Running Borrowed), t/comb.t bridge default now a Future. Not committed.
+
+2026-09-27 06:25 Committed 807f380: Role::Upstream, Upstream::Static, Upstream::K8s, bridge_manifests, reconcile 5b. prove -lr t/ green (unit mode, 20 files, 173 tests; TEST_KUBERNETES_COMB_* unset).
