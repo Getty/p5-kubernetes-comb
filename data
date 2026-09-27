@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-09-27T05:53:08Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T05:53:08Z
+created: 2026-09-27T04:25:51Z
+depends_on:
+- 3
+id: 4
+priority: high
+started: 2026-09-27T05:53:08Z
+status: done
+tags:
+- core
+- reconcile
+title: 'reconcile: state machine, upstream resolution, pruning, status write'
+updated: 2026-09-27T05:53:08Z
+---
+
+SPEC §5 Resolution, §7. One step, returns a Future of the new status, never fails (any error, including a die inside a hook or manifests, becomes phase Error). Order: resolve upstream (controlling coderef > CR spec.upstream > class method > local; "exists" not truthiness; spec.upstream explicit null = local; empty return = local; K8s => (...) and +Class => (...) shortcuts; an object doing Role::Upstream accepted) > enabled > dependencies via resolver (ref "name" or "namespace/name"; resolver returns undef -> Blocked "not found"; dependency healthy false -> Blocked) > check hook (missing prerequisites -> NeedsConfig with message) > local path (healthy -> Running, else manifests -> deploy -> prune -> Pending) > write status. The upstream path (5b) is k5: here only resolution plus a clean hand-off point. Corners from proto (~/dev/proto lib/HI/Comb/Controller.pm _reconcile_one/_prune_orphans/_update_status, inspiration only): (1) enabled undef = auto: SPEC leaves "auto" open; proto used a class flag `optional` (auto = on unless optional) - implement that as an overridable class method and flag it in the report. (2) managedResources must be carried forward in phases that do not deploy (Disabled, Blocked, NeedsConfig, Running), or pruning loses track. (3) Prune only what this Comb recorded AND still carries its comb label; never delete foreign objects. The diff key must not depend on the API version (a v1beta1 -> v1 move must not delete). A failed prune stays in managedResources for the next step. (4) Deploy failing half-way: managedResources = previous union what was applied, phase Error. (5) Conditions: lastTransitionTime changes only when the condition status flips (proto reset it every step). (6) observedGeneration from metadata.generation. (7) Status write via update_status; replace the crd attribute with the returned object; a resourceVersion conflict must not kill reconcile (re-read and retry once, or report) - reconcile still never fails. Without a CR the status lives in memory only.
+
+2026-09-27 05:40 Plan: reconcile in Comb.pm as nested two-arg ->then steps over one context hash; local health via public status (healthy key, live message in Ready); _render failures tagged category 'manifests' so ManifestsFailed is told apart from API errors; prune = list by label per resource+ns -> delete, else get -> foreign (kept, noted) or gone (dropped); version-free key group/kind/ns/name; status write update_status + one re-read/retry, else kept in memory with StatusWritten=False. Minimal Role::Upstream file (requires status endpoints) so resolution checks DOES. Upstream objects built as Class->new(%args) exactly (SPEC §5), comb not passed - k5 decides. Hand-off: _reconcile_upstream($r) -> Error UpstreamNotImplemented.
+
+2026-09-27 05:51 Open points for the maintainer (SPEC literal kept): (1) healthy -> Running never re-applies or prunes, so manifest drift and dropped resources of a healthy Comb wait for the next unhealthy step; failed prunes retry only then. Proposal: deploy in the Running branch when rendered identities differ from managedResources. (2) Own health decided via public status (healthy key, live message goes into Ready); dependencies via healthy per card - a class overriding only healthy is seen by dependents, not by its own reconcile. (3) Short names generalised: Name => (...) -> Kubernetes::Comb::Upstream::Name (Static works too). (4) Upstream resolved before enabled: a dying upstream coderef makes even a disabled Comb Error. (5) config is lazy and does not follow _set_crd after a conflict re-read (k3 behaviour). (6) A group move (extensions -> networking.k8s.io) counts as orphan; modern servers do not serve the old group, so the list fails and it is retained. Also found (test-writer lane): the fake does not enforce resourceVersion on update_status, so conflict tests use fail_on.
+
+2026-09-27 05:51 Done: reconcile in lib/Kubernetes/Comb.pm (steps 1-6, never fails; conditions Ready/DependenciesReady/ConfigReady, StatusWritten only on a failed write; update_status + one re-read/retry, else kept in memory; prune by version-free key with label check), optional contract method, _render failures tagged category manifests, minimal lib/Kubernetes/Comb/Role/Upstream.pm. k5 hand-off: _reconcile_upstream($r) (now Error UpstreamNotImplemented) fills phase/managed/endpoints/upstream_status; upstreams built as Class->new(%args), comb not passed. Tests: t/reconcile{,-prune,-upstream,-status}.t + t/lib/TestComb/Configurable.pm + Fixtures deployment/service. Verified: prove -lr t/ green, unit mode only (integration env unset), 16 files/133 tests, no skips.
+
+2026-09-27 05:53 Committed as 12321b5: Add reconcile: upstream resolution, enabled, dependencies, check, local deploy with pruning, status write (k4)
