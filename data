@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-09-27T05:53:11Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T05:53:11Z
+created: 2026-09-27T04:26:04Z
+depends_on:
+- 3
+id: 6
+priority: medium
+started: 2026-09-27T05:53:11Z
+status: done
+tags:
+- static
+title: 'Kubernetes::Comb::Static: manifests from .pk8s / YAML files'
+updated: 2026-09-27T05:53:11Z
+---
+
+SPEC §10, §9. Optional subclass (or role - propose) that loads manifests from .pk8s (IO::K8s Perl DSL) or YAML files via IO::K8s->load / load_yaml, e.g. from a distribution share dir. Stubs are often just a .pk8s file through it. Unit tests with fixture files under t/.
+
+2026-09-27 05:36 Findings (IO::K8s 1.108, load code identical in 1.109 tree): (1) load($file) evals the .pk8s in a fresh package with only the DSL subs -- no way to pass config/name/namespace in; namespace+labels come from deploy anyway, so Static manifests are static by design. (2) Every load() leaves a new IO::K8s::Manifest::_LOADER_* package behind: ~850 KB RSS per call measured (42 MB over 50 loads) -- uncached, every status/deploy would leak. (3) load() reads the .pk8s as bytes: non-ASCII string literals come out double-encoded. (4) load_yaml($path) reads bytes too: any non-ASCII YAML file dies in YAML::PP (C1 control char); a missing path is taken as YAML text and silently yields 0 objects. Decision: role Kubernetes::Comb::Role::Static (composes into stubs: Stub extends Original, with the role) + thin class Kubernetes::Comb::Static (extends Comb, with the role) so the SPEC name keeps existing.
+
+2026-09-27 05:40 Upstream ticket candidates for the io-k8s-p5 board (dispatcher to file): (a) IO::K8s->load leaves one IO::K8s::Manifest::_LOADER_* package per call (~850 KB RSS each, measured on 1.108) -- unbounded growth in any long-running caller; Static caches per instance, so it costs one per Comb instance until fixed. (b) load_yaml($path) reads the file as bytes and passes them to YAML::PP::Load, which wants characters: a non-ASCII YAML file dies ('Invalid plain scalar'); and a path that is not a file is parsed as YAML text, silently 0 objects. Static reads the file itself (Path::Tiny slurp_utf8) and passes the text -- the documented string form, no shim. (c) optional feature, only if wanted: load() cannot pass values into a .pk8s (it evals in a fresh package with just the DSL subs). Not a bug: non-ASCII in .pk8s needs 'use utf8;' in the file (plain Perl source rules), documented + tested. SPEC note for the maintainer: §3 lists only Kubernetes::Comb::Static; the role Kubernetes::Comb::Role::Static is new public API and is what §9's 'stubs via Static' means for a stub that extends its original -- one SPEC line if accepted.
+
+2026-09-27 05:40 Done: new lib/Kubernetes/Comb/Role/Static.pm (requires io_k8s + manifest_files; provides manifests, manifest_dir; .pk8s via io_k8s->load, .yaml/.yml via io_k8s->load_yaml of the UTF-8 text; multi-doc YAML; per-instance lazy cache, failed read retried; errors croak naming the file -> failed Future in deploy/status) and lib/Kubernetes/Comb/Static.pm (extends Comb, with the role, manifest_files croaks 'override manifest_files'). Decision: role + thin class -- the role composes into stubs (Stub extends Original, with Role::Static) and user hierarchies, the class keeps the SPEC §3 name. cpanfile: Path::Tiny moved from test to runtime requires (now used in lib/). Tests: t/static.t (10 subtests) + fixtures t/data/static/*; prove -l t/static*.t green unit-only, also green against IO::K8s 1.108 (-I sibling 1.108 lib); mutation-checked (no cache / path to load_yaml / no autoclean / bare IO::K8s each go red). Comb.pm untouched; full suite not run (k4 worker owns that).
+
+2026-09-27 05:53 Committed as 6781a15: Add Kubernetes::Comb::Static and Role::Static: manifests from .pk8s and YAML files (k6)
