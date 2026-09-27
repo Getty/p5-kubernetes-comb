@@ -1,0 +1,30 @@
+---
+claimed_at: 2026-09-27T06:59:49Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T06:59:25Z
+created: 2026-09-27T04:26:14Z
+depends_on:
+- 5
+- 6
+id: 8
+priority: medium
+started: 2026-09-27T06:59:25Z
+status: done
+tags:
+- tests
+title: Test coverage audit against SPEC §12 + env-gated integration test
+updated: 2026-09-27T06:59:49Z
+---
+
+SPEC §12. Every reconcile transition covered (Disabled, Blocked, NeedsConfig, Pending, Running, Error, pruning), Upstream::Static replica and bridge tests incl. multi-level via chains, stub contract check has its own test, Future semantics (no lifecycle method throws). Integration test gated on the SPEC §12 env vars (kubeconfig var; upstream part also on the upstream-context var); never set them, only make sure the test skips cleanly and is correct.
+
+2026-09-27 06:40 Audit: mapped SPEC §12 + §7 transitions + §5 resolution + §9 stub contract against t/*.t (k3-k6's own tests). Every transition (Disabled, Blocked, NeedsConfig, Pending, Running, Error, pruning), Upstream::Static/K8s replica+bridge+multi-level via chains, loop detection, resourceVersion-conflict retry (fail_on-based), stub contract, and 'Future never throws' are already covered, file by file. Ran Devel::Cover over the whole suite (98.7% stmt, 90.9% branch): remaining branch/condition gaps are (a) the $KUBECONFIG/~/.kube/config fallback in Client::Sync/Async -- correctly untested, exercising it would read a real env var/file, which the harness must never do; (b) Client::Async's list/delete/patch/update_status/patch_status/log all route through the identical generic _call wrapper already proven never-throwing via get/ensure/update -- duplicative to add; (c) a couple of rare truth-table cells on already well-tested boolean guards (e.g. Upstream::K8s' 'is this Comb itself' self-check). None of these are bugs. Conclusion: no TODO/regression tests needed -- the existing 173 unit tests (20 files) stand as-is, untouched.
+
+2026-09-27 06:40 Added t/integration/comb.t (SPEC §12: gated on TEST_KUBERNETES_COMB_KUBECONFIG, upstream cross-context part additionally on TEST_KUBERNETES_COMB_UPSTREAM_CONTEXT; never set here). Creates a uniquely-named namespace, installs the CRD via Kubernetes::Comb::CRD::Comb->to_crd (deleted afterward only if it didn't already exist), creates a Comb CR for a tiny inline IntegrationTest::Comb (busybox Deployment + Service), reconciles with a bounded wait to Running, exercises status/healthy/logs/restart/stop and a re-deploy after stop, then borrows via Upstream::Static to verify on a real API server that switching the local ClusterIP Service to ExternalName in place actually drops clusterIP and selector (k5 finding (d)) and prunes the Deployment, then switches back to local. The gated second half additionally reconciles a real peer Comb in another kube context and borrows from it via Upstream::Static -> Kubernetes::Comb::Upstream::K8s with explicit context/namespace/name. Cleanup runs in an END block (LIFO) so it fires even on a died Future ->get. Verified: perl -c compiles; prove -lr t/integration/ and prove -lr t/ both show it as a clean 'skipped: ...' with TEST_KUBERNETES_COMB_* unset (never set them); did not and will not run it against a cluster. dzil build only picks up committed files (t/examples.t and t/integration/comb.t are both untracked right now, expected pre-commit).
+
+2026-09-27 06:40 Verified: prove -lr t/ green, unit mode only (TEST_KUBERNETES_COMB_* unset) -- 22 files, 190 tests (173 pre-existing + t/examples.t from k7's parallel work, untouched, + t/integration/comb.t contributing a clean skip and 0 tests). loadguard had headroom throughout, no waits needed. Proposed commit subject: 'Add the integration test and confirm unit coverage against SPEC §12 (k8)'. Changes line: 'Audited unit coverage against SPEC §12 (no gaps found); added the env-gated cluster integration test t/integration/comb.t.'
+
+2026-09-27 06:40 Audit complete: unit suite (173 tests, 20 files, all from k3-k6) already covers every SPEC §12 requirement -- no TODO/regression tests added, none were warranted (see notes for the Devel::Cover pass and why each remaining branch gap is either a safety-rule exclusion or mechanically redundant). Added t/integration/comb.t: env-gated (TEST_KUBERNETES_COMB_KUBECONFIG, +TEST_KUBERNETES_COMB_UPSTREAM_CONTEXT), creates its own namespace+CRD+CR, reconciles a tiny Comb to Running, exercises status/logs/restart/stop, verifies the ClusterIP->ExternalName bridge switch on a real API server (k5 finding d), and a cross-context Upstream::K8s borrow -- cleans up in an END block even on failure. Verified compiling and skipping cleanly with no env vars set; never run against a cluster. prove -lr t/: 22 files/190 tests green, unit mode only. Nothing left in lib/ was touched.
+
+2026-09-27 06:59 Committed 19c7071: Add the env-gated integration test and confirm unit coverage against SPEC §12 (k8). Unit suite green (t/ minus t/examples.t): 21 files, 173 tests, unit mode (TEST_KUBERNETES_COMB_* unset); t/integration/comb.t skips cleanly.
