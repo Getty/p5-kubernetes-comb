@@ -58,15 +58,16 @@ resource -- and from then on only calls its methods. All Kubernetes work
 happens in here, through the L</k8s> client.
 
 A Comb class extends this one and overrides the contract: L</name>,
-L</depends_on>, L</endpoints>, L</manifests>, L</check>,
+L</depends_on>, L</endpoints>, L</manifests>, L</check>, L</optional>,
 L</bridge_manifests>, L</stub_class>. It may also define a plain C<upstream>
 method (where its service is borrowed from); this class deliberately defines
 none, so whether a class has one is visible to C<can>.
 
-Every lifecycle method -- L</deploy>, L</status>, L</healthy>, L</logs>,
-L</restart>, L</stop>, L</describe>, L</endpoint> -- returns a L<Future> and
-never throws: any error, including one in a contract method, is a failed
-Future.
+Every lifecycle method -- L</reconcile>, L</deploy>, L</status>,
+L</healthy>, L</logs>, L</restart>, L</stop>, L</describe>, L</endpoint> --
+returns a L<Future> and never throws: any error, including one in a contract
+method, is a failed Future. L</reconcile> goes further: its Future never
+fails at all.
 
 =cut
 
@@ -349,6 +350,16 @@ missing.
 
 =cut
 
+sub optional { 0 }
+
+=method optional
+
+Whether the Comb stays off until it is switched on: with C<spec.enabled>
+unset, L</reconcile> leaves an optional Comb C<Disabled> and runs any other
+one. Default false. Works as class and as instance method.
+
+=cut
+
 sub bridge_manifests { return }
 
 =method bridge_manifests
@@ -486,6 +497,93 @@ Pod template annotation L</restart> sets: C<E<lt>label_prefixE<gt>restartedAt>.
 #### Lifecycle
 ####
 
+sub reconcile {
+  my ( $self ) = @_;
+  my $r = { previous => $self->recorded_status, conditions => {} };
+  return Future->call( sub { $self->_reconcile_steps($r) } )
+    ->else( sub { $self->_finish( $r, Error => ReconcileFailed => $self->_message( $_[0] ) ) } )
+    ->then( sub { $self->_publish_endpoints($r) } )
+    ->then( sub { $self->_record($r) } )
+    ->else( sub { Future->done( $self->_last_resort( $_[0] ) ) } );
+}
+
+=method reconcile
+
+  my $status = $comb->reconcile->get;
+  print $status->phase;
+
+One step towards what the Comb class describes. Future of the new recorded
+status, a L<Kubernetes::Comb::CRD::CombStatus> -- also what
+L</recorded_status> returns afterwards. The Future never fails: whatever
+goes wrong, a dying contract method or a broken client included, becomes
+phase C<Error> with the reason in the C<Ready> condition. Run one step at a
+time per Comb. In order:
+
+=over
+
+=item 1. Upstream
+
+Resolved from the first source that I<exists>, whose answer is final even
+when it is "local": the L</upstream> constructor argument, C<spec.upstream>
+of L</crd> (an explicit C<null> is "local"), a class method C<upstream>;
+else local. The coderef and the class method return nothing (local), an
+object doing L<Kubernetes::Comb::Role::Upstream>, C<< Name => (%args) >>
+for C<< Kubernetes::Comb::Upstream::Name->new(%args) >>, or
+C<< '+Full::Class' => (%args) >> for that class -- or a Future of that. The
+custom resource and a hashref say C<< { class => 'Full::Class', %args } >>,
+the class always fully qualified. An answer that does not resolve is an
+C<Error>.
+
+=item 2. Enabled
+
+C<spec.enabled> false, or unset while the class is L</optional>:
+C<Disabled>. A disabled Comb touches no resource -- what runs keeps running.
+
+=item 3. Dependencies
+
+Each of L</depends_on> goes to the L</resolver> as written (C<name> or
+C<namespace/name>), with the Comb as second argument; it returns the Comb
+instance or C<undef>. One not found, one whose L</healthy> is false or
+fails, a dying resolver, or none at all: C<Blocked>, every problem in the
+message.
+
+=item 4. Check
+
+L</check> reports missing prerequisites: C<NeedsConfig>.
+
+=item 5. Local
+
+L</status> healthy: C<Running>. Otherwise L</deploy>, then prune: every
+resource this Comb recorded in C<managedResources> that it no longer
+renders -- compared by group, kind, namespace and name, so a new API version
+is no orphan -- is deleted if it still carries L</label_selector>. One that
+lost the label is left alone and dropped from the record, one that is gone
+is dropped, one that fails to delete stays for the next step. Then
+C<Pending>. A deploy that fails half-way is an C<Error> that records what it
+applied on top of the previous record, and prunes nothing. A reconcile after
+L</stop> deploys again, which scales the workloads back up.
+
+With an active upstream: not implemented yet, an C<Error>.
+
+=item 6. Record
+
+Phase, conditions, the resolved endpoints (while local),
+C<managedResources> (carried forward by the steps that do not deploy) and
+C<observedGeneration> go through C<update_status> into L</crd>, which is
+replaced by what the API server returns; without a custom resource the
+status is kept in memory. A failed write is retried once on a freshly read
+custom resource; if that fails too the status is kept in memory and carries
+a C<StatusWritten> condition that says why.
+
+=back
+
+Conditions: C<Ready> (C<True> when C<Running>; its reason and message are
+the step's), C<DependenciesReady> and C<ConfigReady>, each C<Unknown> with
+reason C<NotChecked> when the step did not get that far. Their
+C<lastTransitionTime> changes only when their status does.
+
+=cut
+
 sub deploy {
   my ( $self ) = @_;
   return Future->call( sub {
@@ -502,6 +600,7 @@ workloads) with L</comb_labels>, puts L</namespace> on namespaced resources
 that name none, and creates or updates them one after the other. Future of
 the objects as stored. A failure stops at that resource; the Future fails
 with the message, category C<deploy> and C<< { applied => [...], failed => $manifest } >>.
+Manifests that do not render fail it with category C<manifests>.
 
 =cut
 
@@ -720,9 +819,13 @@ sub _hook {
   } );
 }
 
+# Fails with category manifests, so a broken manifest stays apart from a
+# failing request further down the chain.
 sub _render {
   my ( $self ) = @_;
-  return $self->_hook('manifests')->then( sub { Future->done( $self->_items(@_) ) } );
+  return $self->_hook('manifests')
+    ->then( sub { Future->done( $self->_items(@_) ) } )
+    ->else( sub { Future->fail( $_[0], 'manifests' ) } );
 }
 
 sub _items {
@@ -1145,6 +1248,489 @@ sub _declared_endpoints {
 sub _endpoint_names {
   my ( $self ) = @_;
   return map { $_->{name} } $self->_declared_endpoints;
+}
+
+####
+#### Reconcile internals
+####
+
+# One reconcile step works on $r: previous (the recorded status it started
+# from), conditions (type => { status, reason, message }), upstream (the
+# resolved one, undef for local; absent while unresolved), then phase, reason
+# and message, and -- where a step knows them -- managed (resource hashrefs)
+# and endpoints (Kubernetes::Comb::Endpoint). Each step either finishes $r
+# or hands it to the next; a step whose own work fails finishes it as Error.
+
+sub _status_class  { 'Kubernetes::Comb::CRD::CombStatus' }
+sub _upstream_role { 'Kubernetes::Comb::Role::Upstream' }
+
+sub _finish {
+  my ( $self, $r, $phase, $reason, $message ) = @_;
+  @{$r}{qw( phase reason message )} = ( $phase, $reason, $message );
+  return Future->done($r);
+}
+
+sub _condition {
+  my ( $self, $r, $type, $status, $reason, $message ) = @_;
+  $r->{conditions}{$type} = { status => $status, reason => $reason, message => $message };
+  return;
+}
+
+sub _message {
+  my ( $self, $error ) = @_;
+  return defined $error ? ( ''.$error ) =~ s/\s+\z//r : 'unknown error';
+}
+
+# Step 1, then on.
+sub _reconcile_steps {
+  my ( $self, $r ) = @_;
+  return $self->_resolve_upstream->then(
+    sub {
+      ( $r->{upstream} ) = @_;
+      return $self->_reconcile_enabled($r);
+    },
+    sub {
+      $self->_finish( $r, Error => UpstreamFailed => 'resolving the upstream failed: '.$self->_message( $_[0] ) );
+    }
+  );
+}
+
+# Steps 2 and 3.
+sub _reconcile_enabled {
+  my ( $self, $r ) = @_;
+  my $off = $self->_disabled_because;
+  return $self->_finish( $r, Disabled => Disabled => $off ) if defined $off;
+  return $self->_unmet_dependencies->then(
+    sub {
+      my @unmet = @_;
+      unless (@unmet) {
+        $self->_condition( $r, DependenciesReady => True => Healthy => 'all dependencies are healthy' );
+        return $self->_reconcile_check($r);
+      }
+      my $message = join '; ', map { $_->{message} } @unmet;
+      $self->_condition( $r, DependenciesReady => False => $unmet[0]{reason}, $message );
+      return $self->_finish( $r, Blocked => $unmet[0]{reason}, $message );
+    },
+    sub {
+      $self->_finish( $r, Error => DependenciesFailed => 'reading the dependencies failed: '.$self->_message( $_[0] ) );
+    }
+  );
+}
+
+sub _disabled_because {
+  my ( $self ) = @_;
+  my $spec = $self->has_crd ? $self->crd->spec : undef;
+  my $enabled = $spec ? $spec->enabled : undef;
+  return defined $enabled ? ( $enabled ? undef : 'spec.enabled is false' )
+       : $self->optional   ? ref($self).' is optional and spec.enabled is not set'
+       :                     undef;
+}
+
+# Future of one { reason, message } per dependency that is not there.
+sub _unmet_dependencies {
+  my ( $self ) = @_;
+  return Future->call( sub {
+    my @refs = $self->depends_on;
+    return Future->done unless @refs;
+    return Future->done( {
+      reason  => 'NoResolver',
+      message => 'depends on '.join( ', ', @refs ).', but there is no resolver to find them'
+    } ) unless $self->has_resolver;
+    return Future->needs_all( map { $self->_unmet_dependency($_) } @refs );
+  } );
+}
+
+sub _unmet_dependency {
+  my ( $self, $ref ) = @_;
+  return Future->call( sub {
+    my $dependency = $self->resolver->( $ref, $self );
+    return Future->done( { reason => 'DependencyNotFound', message => 'dependency '.$ref.' not found' } )
+      unless defined $dependency;
+    return Future->done( {
+      reason  => 'DependencyInvalid',
+      message => 'the resolver returned '.( ref $dependency || 'a plain scalar' ).' for '.$ref.', not a Comb'
+    } ) unless blessed $dependency && $dependency->can('healthy');
+    return $dependency->healthy->then(
+      sub {
+        return Future->done if $_[0];
+        return Future->done( { reason => 'DependencyNotReady', message => 'dependency '.$ref.' is not healthy' } );
+      },
+      sub {
+        return Future->done( {
+          reason  => 'DependencyNotReady',
+          message => 'dependency '.$ref.' is not healthy: '.$self->_message( $_[0] )
+        } );
+      }
+    );
+  } )->else( sub {
+    Future->done( { reason => 'ResolverFailed', message => 'looking up '.$ref.' failed: '.$self->_message( $_[0] ) } );
+  } );
+}
+
+# Step 4, then the path.
+sub _reconcile_check {
+  my ( $self, $r ) = @_;
+  return $self->_hook('check')->then(
+    sub {
+      my @missing = @_;
+      if (@missing) {
+        my $message = 'missing: '.join( '; ', @missing );
+        $self->_condition( $r, ConfigReady => False => MissingPrerequisites => $message );
+        return $self->_finish( $r, NeedsConfig => MissingPrerequisites => $message );
+      }
+      $self->_condition( $r, ConfigReady => True => Complete => 'nothing missing' );
+      return defined $r->{upstream} ? $self->_reconcile_upstream($r) : $self->_reconcile_local($r);
+    },
+    sub {
+      my $message = 'check failed: '.$self->_message( $_[0] );
+      $self->_condition( $r, ConfigReady => Unknown => CheckFailed => $message );
+      return $self->_finish( $r, Error => CheckFailed => $message );
+    }
+  );
+}
+
+# Step 5a.
+sub _reconcile_local {
+  my ( $self, $r ) = @_;
+  my $manifests_failed = sub {
+    $self->_finish( $r, Error => ManifestsFailed => 'rendering the manifests failed: '.$self->_message( $_[0] ) );
+  };
+  return $self->status->then(
+    sub {
+      my ( $live ) = @_;
+      return $self->_finish( $r, Running => Healthy => 'healthy' ) if $live->{healthy};
+      return $self->_render->then( sub { $self->_deploy_and_prune( $r, $live, @_ ) }, $manifests_failed );
+    },
+    sub {
+      my ( $error, $category ) = @_;
+      return $manifests_failed->($error) if ( $category // '' ) eq 'manifests';
+      return $self->_finish( $r, Error => StatusFailed => 'reading the live status failed: '.$self->_message($error) );
+    }
+  );
+}
+
+# Step 5b, the upstream path: upstream status and endpoints, replicate_into,
+# the bridge; it fills phase, managed, endpoints and upstream_status of $r.
+# Not implemented yet.
+sub _reconcile_upstream {
+  my ( $self, $r ) = @_;
+  return $self->_finish( $r, Error => UpstreamNotImplemented => 'the upstream '.ref( $r->{upstream} )
+    .' is active, but borrowing from an upstream is not implemented yet' );
+}
+
+sub _deploy_and_prune {
+  my ( $self, $r, $live, @items ) = @_;
+  my @previous = $self->_previous_resources($r);
+  my @desired  = map { $self->_resource_of($_) } @items;
+  return $self->_apply(@items)->then(
+    sub {
+      my %desired = map { ( $self->_resource_key($_) => 1 ) } @desired;
+      return $self->_prune( grep { !$desired{ $self->_resource_key($_) } } @previous )->then( sub {
+        my @pruned = @_;
+        $r->{managed} = $self->_union( \@desired, [ map { $_->{resource} } grep { $_->{keep} } @pruned ] );
+        my $waiting = $live->{phase} ne 'NotDeployed' && $live->{message} ? ' ('.$live->{message}.')' : '';
+        return $self->_finish( $r, Pending => Deployed => join '; ',
+          'applied '.scalar(@items).' resource(s), not healthy yet'.$waiting,
+          map { $_->{note} // () } @pruned
+        );
+      } );
+    },
+    sub {
+      my ( $error, $category, $details ) = @_;
+      # _apply goes one after the other: what it applied are the first items
+      my $applied = ( $category // '' ) eq 'deploy' && ref $details eq 'HASH'
+        ? scalar @{ $details->{applied} // [] }
+        : 0;
+      $r->{managed} = $self->_union( [ @desired[ 0 .. $applied - 1 ] ], \@previous );
+      return $self->_finish( $r, Error => DeployFailed => 'deploy failed: '.$self->_message($error) );
+    }
+  );
+}
+
+sub _previous_resources {
+  my ( $self, $r ) = @_;
+  my $recorded = $r->{previous} ? $r->{previous}->managedResources : undef;
+  return map { +{
+    apiVersion => $_->apiVersion,
+    kind       => $_->kind,
+    ( defined $_->namespace ? ( namespace => $_->namespace ) : () ),
+    name       => $_->name
+  } } @{ $recorded // [] };
+}
+
+sub _resource_of {
+  my ( $self, $item ) = @_;
+  return {
+    apiVersion => $item->{apiVersion},
+    kind       => $item->{kind},
+    ( defined $item->{namespace} ? ( namespace => $item->{namespace} ) : () ),
+    name       => $item->{name}
+  };
+}
+
+# Identity of a resource across API versions: group, kind, namespace, name.
+sub _resource_key {
+  my ( $self, $resource ) = @_;
+  my ( $group ) = $resource->{apiVersion} =~ m{\A(.+)/[^/]+\z};
+  return join "\0", $group // '', $resource->{kind}, $resource->{namespace} // '', $resource->{name};
+}
+
+# The lists joined, the first of each identity kept.
+sub _union {
+  my ( $self, @lists ) = @_;
+  my ( %seen, @union );
+  for my $resource ( map { @$_ } @lists ) {
+    push @union, $resource unless $seen{ $self->_resource_key($resource) }++;
+  }
+  return \@union;
+}
+
+# Future of { resource, keep, note } per orphan; never fails. An orphan that
+# still carries the Comb label is deleted. One that does not is gone or no
+# longer this Comb's -- not ours to delete either way. A failed check or
+# delete keeps it for the next step.
+sub _prune {
+  my ( $self, @orphans ) = @_;
+  return Future->done unless @orphans;
+  my %groups;
+  push @{ $groups{ $_->{apiVersion}.'/'.$_->{kind} }{ $_->{namespace} // '' } }, $_ for @orphans;
+  return Future->needs_all( map {
+    my $resource = $_;
+    map {
+      my ( $namespace, $members ) = ( $_, $groups{$resource}{$_} );
+      $self->k8s->list( $resource,
+        ( length $namespace ? ( namespace => $namespace ) : () ),
+        labelSelector => $self->label_selector
+      )->then(
+        sub {
+          my %live = map { ( $_->metadata->name => $_ ) } @{ $_[0]->items // [] };
+          return Future->needs_all( map { $self->_prune_one( $resource, $_, $live{ $_->{name} } ) } @$members );
+        },
+        sub {
+          my $error = $self->_message( $_[0] );
+          return Future->done( map { +{
+            resource => $_,
+            keep     => 1,
+            note     => 'could not check '.$_->{kind}.' '.$_->{name}.' for pruning: '.$error
+          } } @$members );
+        }
+      );
+    } sort keys %{ $groups{$resource} };
+  } sort keys %groups );
+}
+
+sub _prune_one {
+  my ( $self, $resource, $orphan, $live ) = @_;
+  my $what = $orphan->{kind}.' '.$orphan->{name};
+  return $self->k8s->delete($live)->then(
+    sub { Future->done( { resource => $orphan, keep => 0 } ) },
+    sub {
+      Future->done( {
+        resource => $orphan,
+        keep     => 1,
+        note     => 'deleting '.$what.' failed: '.$self->_message( $_[0] )
+      } );
+    }
+  ) if $live;
+  return $self->k8s->get( $resource, $orphan->{name},
+    ( defined $orphan->{namespace} ? ( namespace => $orphan->{namespace} ) : () )
+  )->then(
+    sub {
+      Future->done( {
+        resource => $orphan,
+        keep     => 0,
+        note     => 'left '.$what.' alone: it no longer carries '.$self->label_selector
+      } );
+    },
+    sub { Future->done( { resource => $orphan, keep => 0 } ) }
+  );
+}
+
+# Step 1: Future of the upstream object, or of nothing for local. The first
+# source that exists decides.
+sub _resolve_upstream {
+  my ( $self ) = @_;
+  return Future->call( sub {
+    if ( $self->_has_upstream ) {
+      my $given = $self->_upstream;
+      return $self->_hook($given)->then( sub {
+        Future->done( $self->_upstream_from( 'the upstream coderef', @_ ) );
+      } ) if ref $given eq 'CODE';
+      return Future->done(
+        $self->_upstream_from( 'the upstream argument', ref $given eq 'ARRAY' ? @$given : $given )
+      );
+    }
+    my $spec = $self->has_crd ? $self->crd->spec : undef;
+    return Future->done( $self->_upstream_from( 'spec.upstream', $spec->upstream ) )
+      if $spec && $spec->has_upstream;
+    return $self->_hook('upstream')->then( sub {
+      Future->done( $self->_upstream_from( ref($self).'->upstream', @_ ) );
+    } ) if $self->can('upstream');
+    return Future->done;
+  } );
+}
+
+# One answer: nothing (local), an upstream object, a hashref as in the custom
+# resource, or Name => (%args) / '+Full::Class' => (%args).
+sub _upstream_from {
+  my ( $self, $source, @answer ) = @_;
+  return if !@answer || ( @answer == 1 && !defined $answer[0] );
+  my ( $first, @args ) = @answer;
+  if ( ref $first ) {
+    croak $source.': one upstream object or hashref, not a list of '.scalar(@answer) if @args;
+    return $self->_checked_upstream( $source, $first ) if blessed $first;
+    croak $source.': expected nothing, an upstream object, a hashref or Name => (...), got a '
+      .ref($first).' reference' unless ref $first eq 'HASH';
+    my %spec = %$first;
+    my $class = delete $spec{class};
+    croak $source.' names no class' unless defined $class && length $class;
+    return $self->_build_upstream( $source, $class, %spec );
+  }
+  croak $source.': expected nothing, an upstream object, a hashref or Name => (...), got a list starting with undef'
+    unless defined $first;
+  croak $source.': '.$first.' => (...) needs key/value pairs' if @args % 2;
+  return $self->_build_upstream( $source, $self->_upstream_class($first), @args );
+}
+
+sub _upstream_class {
+  my ( $self, $name ) = @_;
+  return $name =~ /\A\+(.+)\z/ ? $1 : 'Kubernetes::Comb::Upstream::'.$name;
+}
+
+sub _build_upstream {
+  my ( $self, $source, $class, @args ) = @_;
+  use_module($class) unless $class->can('new');
+  return $self->_checked_upstream( $source, $class->new(@args) );
+}
+
+sub _checked_upstream {
+  my ( $self, $source, $upstream ) = @_;
+  croak $source.': '.ref($upstream).' does not do '.$self->_upstream_role
+    unless $upstream->DOES( $self->_upstream_role );
+  return $upstream;
+}
+
+# Step 6, first half: the resolved local endpoints -- the upstream path
+# brings its own.
+sub _publish_endpoints {
+  my ( $self, $r ) = @_;
+  return Future->done($r) if $r->{endpoints} || !exists $r->{upstream} || defined $r->{upstream};
+  return $self->_resolve_endpoints->then(
+    sub {
+      $r->{endpoints} = [@_];
+      return Future->done($r);
+    },
+    sub {
+      return Future->done($r) if $r->{phase} eq 'Error';
+      return $self->_finish( $r, Error => EndpointsFailed => 'resolving the endpoints failed: '.$self->_message( $_[0] ) );
+    }
+  );
+}
+
+# Step 6: into the custom resource, else into memory.
+sub _record {
+  my ( $self, $r ) = @_;
+  my $status = $self->_status_from($r);
+  unless ( $self->has_crd ) {
+    $self->_memory_status($status);
+    return Future->done($status);
+  }
+  return Future->call( sub { $self->_write_status($status) } )->then(
+    sub {
+      my ( $stored ) = @_;
+      $self->_set_crd($stored);
+      return Future->done( $stored->status // $status );
+    },
+    sub {
+      # Keep what this step did, so the next one prunes against it.
+      $self->_condition( $r, StatusWritten => False => WriteFailed =>
+        'writing the status into the custom resource failed: '.$self->_message( $_[0] ) );
+      my $kept = $self->_status_from($r);
+      $self->_set_crd( $self->_crd_with( $self->crd, $kept ) );
+      return Future->done($kept);
+    }
+  );
+}
+
+# update_status on a copy of the custom resource; if that fails -- a
+# resourceVersion conflict looks like any other error -- once more on a fresh
+# read of it.
+sub _write_status {
+  my ( $self, $status ) = @_;
+  return $self->k8s->update_status( $self->_crd_with( $self->crd, $status ) )->else( sub {
+    my $meta = $self->crd->metadata;
+    return $self->k8s->get( '+'.$self->crd_class, $meta->name, namespace => $meta->namespace )->then( sub {
+      my ( $fresh ) = @_;
+      $self->_set_crd($fresh);
+      return $self->k8s->update_status( $self->_crd_with( $fresh, $status ) );
+    } );
+  } );
+}
+
+sub _crd_with {
+  my ( $self, $crd, $status ) = @_;
+  my $copy = ref($crd)->FROM_HASH( $crd->TO_JSON );
+  $copy->status($status);
+  return $copy;
+}
+
+sub _status_from {
+  my ( $self, $r ) = @_;
+  my $now = $self->_now;
+  my %before = map { ( $_->type => $_ ) } @{ ( $r->{previous} ? $r->{previous}->conditions : undef ) // [] };
+  my %unchecked = ( status => 'Unknown', reason => 'NotChecked', message => 'this step did not get that far' );
+  my %conditions = (
+    DependenciesReady => {%unchecked},
+    ConfigReady       => {%unchecked},
+    %{ $r->{conditions} },
+    Ready => {
+      status  => $r->{phase} eq 'Running' ? 'True' : 'False',
+      reason  => $r->{reason},
+      message => $r->{message}
+    }
+  );
+  my @fixed = qw( Ready DependenciesReady ConfigReady );
+  my %fixed = map { ( $_ => 1 ) } @fixed;
+  my $meta = $self->has_crd ? $self->crd->metadata : undef;
+  my $generation = $meta ? $meta->generation : undef;
+  return $self->_status_class->new(
+    phase            => $r->{phase},
+    conditions       => [ map {
+      my ( $type, $condition, $was ) = ( $_, $conditions{$_}, $before{$_} );
+      +{
+        type               => $type,
+        status             => $condition->{status},
+        ( defined $condition->{reason}  ? ( reason  => $condition->{reason} )  : () ),
+        ( defined $condition->{message} ? ( message => $condition->{message} ) : () ),
+        lastTransitionTime => $was && $was->status eq $condition->{status} && defined $was->lastTransitionTime
+          ? $was->lastTransitionTime
+          : $now
+      };
+    } @fixed, sort grep { !$fixed{$_} } keys %conditions ],
+    managedResources => $r->{managed} // [ $self->_previous_resources($r) ],
+    endpoints        => [ map { $_->to_crd } @{ $r->{endpoints} // [] } ],
+    ( $r->{upstream_status} ? ( upstream           => $r->{upstream_status} ) : () ),
+    ( defined $generation   ? ( observedGeneration => $generation )           : () )
+  );
+}
+
+# When even the status could not be built: the bare minimum, not written.
+sub _last_resort {
+  my ( $self, $error ) = @_;
+  my $status = eval {
+    $self->_status_class->new(
+      phase      => 'Error',
+      conditions => [ {
+        type               => 'Ready',
+        status             => 'False',
+        reason             => 'ReconcileFailed',
+        message            => 'recording the status failed: '.$self->_message($error),
+        lastTransitionTime => $self->_now
+      } ]
+    );
+  };
+  $self->_memory_status($status) if $status && !$self->has_crd;
+  return $status;
 }
 
 sub _now { strftime( '%Y-%m-%dT%H:%M:%SZ', gmtime ) }

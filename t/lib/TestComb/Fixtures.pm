@@ -8,7 +8,7 @@ use warnings;
 use Exporter 'import';
 use Kubernetes::Comb::CRD::Comb;
 
-our @EXPORT_OK = qw( comb_cr comb_labels pod set_status );
+our @EXPORT_OK = qw( comb_cr comb_labels deployment pod service set_status );
 
 =head1 FUNCTIONS
 
@@ -44,6 +44,55 @@ sub comb_cr {
     metadata => { name => $args{name}, namespace => $args{namespace} // 'platform' },
     spec     => { class => $args{class}, %{ $args{spec} // {} } }
   );
+}
+
+=head2 deployment
+
+  my $manifest = deployment('nats', apiVersion => 'apps/v1beta1');
+
+A Deployment manifest without namespace or Comb labels -- what a Comb class
+renders -- with one container and C<app: E<lt>nameE<gt>> as selector.
+
+=cut
+
+sub deployment {
+  my ( $name, %args ) = @_;
+  return {
+    apiVersion => $args{apiVersion} // 'apps/v1',
+    kind       => 'Deployment',
+    metadata   => { name => $name },
+    spec       => {
+      selector => { matchLabels => { app => $name } },
+      template => {
+        metadata => { labels => { app => $name } },
+        spec     => { containers => [ { name => 'main', image => 'img' } ] }
+      }
+    }
+  };
+}
+
+=head2 service
+
+  my $manifest = service('nats');
+  my $stored   = service('old', namespace => 'platform', labels => { comb_labels('nats') });
+
+A Service manifest selecting C<app: E<lt>nameE<gt>> on port 4222. With
+C<namespace> and C<labels> it is what the cluster would hold.
+
+=cut
+
+sub service {
+  my ( $name, %args ) = @_;
+  return {
+    apiVersion => 'v1',
+    kind       => 'Service',
+    metadata   => {
+      name => $name,
+      ( $args{namespace} ? ( namespace => $args{namespace} ) : () ),
+      ( $args{labels}    ? ( labels    => $args{labels} )    : () )
+    },
+    spec => { selector => { app => $name }, ports => [ { port => 4222 } ] }
+  };
 }
 
 =head2 pod
