@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-09-27T05:01:05Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T05:01:05Z
+created: 2026-09-27T04:25:31Z
+id: 1
+priority: high
+started: 2026-09-27T05:01:05Z
+status: done
+tags:
+- crd
+- foundation
+title: CR classes, CRD generator, Endpoint value object
+updated: 2026-09-27T05:01:05Z
+---
+
+SPEC §3, §6, §8. Kubernetes::Comb::CRD::{Comb,CombSpec,CombStatus,CombCondition,CombResource,CombEndpoint,CombUpstreamStatus} as IO::K8s classes (default group comb.internal/v1, kind Comb, plural combs, namespaced, status subresource). CombSpec: class (required), dependsOn, config (free-form), enabled (tri-state Bool: undef=auto), upstream (free-form object: class + upstream-specific keys; "key present with null" must stay distinguishable from "key absent", SPEC §5 "exists" rule). CombStatus: phase, conditions, managedResources, endpoints, upstream (class, context, reachable, phase, via, observedAt), observedGeneration. A resource_map provider (IO::K8s::Role::ResourceMap) so clients can inflate Comb objects. A method that returns the CustomResourceDefinition as an IO::K8s object with `group` as parameter (kind/plural overridable) incl. openAPIV3Schema; config and upstream need x-kubernetes-preserve-unknown-fields. Kubernetes::Comb::Endpoint (Moo value object: name, protocol default tcp, port, cluster, external; to/from CombEndpoint). Documented recipe: a three-line subclass of the CR class for another API group, passed as crd_class. Done: classes load, JSON round-trip of the SPEC §6 example, CRD object for a custom group, unit tests.
+
+2026-09-27 04:40 Read SPEC §3-§8/§14, IO::K8s 1.108 (released tarball), Kubernetes::REST 1.108, NAK 0.009 tree. Findings: IO::K8s 1.108 already has to_crd (IO::K8s::CRD::crd_for_class) from the k8s registry, but emits no subresources -> CR class wraps to_crd (around) to add status subresource + group/kind/plural overrides, so Kubernetes::REST->ensure_crd(class) installs the right CRD too. IO::K8s drops JSON null on inflate and omits undef in TO_JSON (nullable is schema-only by design), so spec.upstream: null needs CombSpec's own FROM_STRUCT (documented IO::K8s hook) + TO_JSON; schema gets nullable: true so the API server keeps the null.
+
+2026-09-27 04:53 Decision: CR API group switch = subclass overriding api_version (recipe in CRD::Comb POD, tested); kind stays derived from the package name (keep ::Comb as last segment). to_crd(group/kind/plural) = around on IO::K8s's to_crd: overrides + status subresource on every version; so Kubernetes::REST->ensure_crd(class) installs the same CRD. Provider Kubernetes::Comb::CRD (crd_class attr) maps Kind + qualified apiVersion/Kind (qualified entry for NAK, which only takes a plain resource_map). phase is documented, not an enum (newer statuses must still inflate); condition status is enum True/False/Unknown. Verified on released IO::K8s 1.108 tarball lib and on installed 1.109.
+
+2026-09-27 04:53 Also found (for the maintainer, SPEC §5): an explicit 'upstream: null' is dropped by 'kubectl apply' (client-side 3-way merge treats null as delete; SSA likely too) -- only create/replace/API writes keep it. Representable and round-tripped here, but may be hard for users to express. Suggested IO::K8s board tickets (optional): (a) class-level subresources for to_crd so ensure_crd emits status subresource without an around; (b) nullable fields keeping an explicit null through inflate/TO_JSON, which would let CombSpec drop its FROM_STRUCT/TO_JSON.
+
+2026-09-27 04:54 Done: lib/Kubernetes/Comb/CRD.pm (resource map provider), CRD/{Comb,CombSpec,CombStatus,CombCondition,CombResource,CombEndpoint,CombUpstreamStatus}.pm, Endpoint.pm; t/crd.t, t/endpoint.t. SPEC §6 example JSON round trip, spec.upstream absent/null/set kept apart (FROM_STRUCT + TO_JSON, schema nullable), to_crd default + group/kind/plural overrides + status subresource, subclass recipe for another group, provider. Verified: prove -lr t/ green (unit mode, no cluster), also against the released IO::K8s/Kubernetes::REST 1.108 libs. Not committed.
+
+2026-09-27 05:00 Committed as a6887c5 (Add the Comb CR classes, CRD generator and Endpoint value object)
