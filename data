@@ -1,0 +1,31 @@
+---
+claimed_at: 2026-09-27T16:12:30Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T16:12:30Z
+created: 2026-09-27T04:26:04Z
+depends_on:
+- 5
+id: 7
+priority: medium
+started: 2026-09-27T16:12:30Z
+status: done
+tags:
+- examples
+title: examples/sync.pl and examples/async.pl
+updated: 2026-09-27T16:12:34Z
+---
+
+SPEC §11, §8. Both drive three Combs: nats local, db replicated (Upstream::Static or Upstream::K8s), mailer as stub; build via from_crd with k8s, resolver, upstream, stub; topological order by depends_on with cycle detection; reconcile repeatedly; print every state transition; write resolved endpoints to an env file for Docker consumers. async.pl on IO::Async with Client::Async, may use Future::AsyncAwait. Example Comb classes live in the example (or examples/lib). No manager ships in lib/. Must compile (perl -c) without a cluster; a test compiles them.
+
+2026-09-27 06:30 Plan: examples/lib/Example/Comb/{NATS,DB,Mailer,Mailer/Stub(.pk8s)} demo classes; examples/combs.yaml (the three CRs); sync.pl + async.pl as mini managers (list CRs, from_crd with k8s/resolver/upstream/stub, rebuild on generation change, topo order + cycle report, reconcile rounds, print transitions, env file from status.endpoints); t/examples.t compiles both.
+
+2026-09-27 06:37 Built: examples/{sync,async}.pl, examples/combs.yaml, examples/lib/Example/Comb/{NATS,DB,Mailer}.pm + Mailer/Stub.pm + Mailer/Stub.pk8s, t/examples.t. Scratch-verified both scripts end to end against t/lib Fake (monkeypatched client ctor, scratchpad only): db Running (Borrowed, ExternalName bridge), nats Pending->Running, mailer Blocked->Pending->Running, stub from .pk8s, env file; K8s upstream path -> Blocked UpstreamUnreachable; injected cycle reported. Decisions: upstream option passed only to Combs with a layer entry (a coderef for all would make its empty answer final and silence spec.upstream); env file from status.endpoints; scripts self-contained (manager chores duplicated so each reads alone / side by side).
+
+2026-09-27 16:08 Also found (outside this card, for the dispatcher): (1) status messages built from croaked errors keep Carp's ' at FILE line N.' -- seen with the fake: 'Context not found: dev at lib/Kubernetes/Comb/Upstream/K8s.pm line 172.' lands in the Ready condition; _message only strips trailing whitespace. (2) API observations for the maintainer: an upstream coderef cannot say 'no opinion' -- given for all Combs its empty answer is final and silences spec.upstream/class upstream (examples pass it only per Comb); check runs before the upstream path and a class cannot tell it is borrowing, so a local-only prerequisite check would make a borrowed Comb NeedsConfig; no public 'all resolved endpoints' (endpoint($name) needs names, endpoints() mixes hashrefs/objects, describe reads status) -- examples use recorded_status->endpoints; Role::Client has no watch, examples poll. (3) release-manager: examples/lib/Example/* packages -- MetaProvides covers only lib/, check they stay unindexed (MetaNoIndex directory examples?). No cpanfile change: all core + existing deps.
+
+2026-09-27 16:08 Done: examples/sync.pl + examples/async.pl (same manager, Client::Sync vs Client::Async/IO::Async/Future::AsyncAwait): list Comb CRs, from_crd with k8s/resolver/upstream/stub, rebuild on uid/generation change, DFS topo order with cycle report, reconcile rounds, (phase, reason) transitions printed, env file <COMB>_<EP>_CLUSTER/_EXTERNAL from status.endpoints. Demo: examples/combs.yaml (nats local, db borrowed via Upstream::Static --db-address or Upstream::K8s --upstream-context, mailer stubbed), classes in examples/lib/Example/Comb/ (Mailer::Stub = Role::Static + Stub.pk8s). t/examples.t: perl -c both (async skips without IO::Async/NAK/F::AA, verified with hidden modules), loads classes, combs.yaml, stub contract + pk8s. Verified: prove -l t/examples.t PASS (17 tests), unit mode, no cluster; scratch end-to-end runs of both scripts against t/lib Fake. lib/ and existing tests untouched.
+
+2026-09-27 16:11 Re-checked against current lib/ (2d1c806 k11 + uncommitted k12 in tree): examples use none of the removed/changed surface (no context attr; names nats/db/mailer and endpoints client/monitor/postgres/smtp/web pass the new validation; Mailer::Stub follows the Foo::Stub convention). prove -l t/examples.t PASS (17), unit mode; perl -c both OK; scratch end-to-end runs of sync+async, K8s-upstream and cycle paths unchanged. Only visible k12 effect: a Blocked Comb now publishes no endpoints until its local path is through, so the env file lists mailer once it deploys -- consistent with the script's comments, no change needed. Card stays in review.
+
+2026-09-27 16:12 Committed 6762738: Add examples/sync.pl and examples/async.pl: three Combs driven like a manager (k7). prove -lr t/ PASS (22 files, 213 tests), unit mode, integration skipped cleanly, no TEST_KUBERNETES_COMB_* vars set. cpanfile unchanged. no_index: not needed -- [@Author::GETTY]'s MetaProvides::Package finder is dzil core :InstallModules (lib/**.pm|pod only, see Dist::Zilla::Dist::Builder::_setup_default_plugins), so examples/lib/Example::Comb::* never enters META 'provides', and PAUSE indexes 'provides' verbatim per the plugin's own POD. Nothing added under lib/ (k9 POD work untouched).
