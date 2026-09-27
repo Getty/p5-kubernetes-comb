@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-09-27T05:31:24Z
+claimed_by: p5-kubernetes-comb
+class: standard
+completed: 2026-09-27T05:31:24Z
+created: 2026-09-27T04:25:43Z
+depends_on:
+- 1
+- 2
+id: 3
+priority: high
+started: 2026-09-27T05:31:24Z
+status: done
+tags:
+- core
+title: 'Kubernetes::Comb base class: contract, from_crd, stubs, lifecycle ops'
+updated: 2026-09-27T05:31:24Z
+---
+
+SPEC §3, §8, §9, §7 "Deploy details". Moo base class. Attributes: k8s (default Client::Sync), resolver, upstream (coderef or spec), crd, crd_class, namespace (from CR metadata / attribute, no scope mapping), config (spec.config), configurable label prefix (default comb.internal/ per §14 proposal) and managed-by value. Contract methods with defaults: name, depends_on, endpoints, manifests, check, bridge_manifests, stub_class; optional class method upstream. from_crd($crd, %opts) with k8s, resolver, upstream, stub; loads spec.class at runtime; stub => sub selects stub_class; stub_class default "${class}::Stub" only if that class loads. Contract check at construction: a stub missing any endpoint name of its original dies naming the missing ones. Lifecycle ops (all Futures, never throw): deploy (inject labels on objects and hashrefs; set namespace on namespaced resources that lack it), status (derived from pods: waiting/terminated reasons, restart counts, PodScheduled=False; Succeeded Job pods must not count as unhealthy; a Comb whose manifests contain no workloads is healthy once its resources exist; readiness = containers ready, not only pod phase Running), healthy, logs (tail lines, multi-pod headers, previous container on CrashLoop), restart (pod template annotation <prefix>restartedAt RFC3339 on Deployment/StatefulSet/DaemonSet; Jobs deleted), stop (Deployments/StatefulSets to 0, CronJobs suspended, Jobs deleted), describe, endpoint($name) (local: cluster = service.namespace.svc:port, service default = comb name, overridable per endpoint). Not in scope: reconcile (k4). Proto (~/dev/proto lib/HI/Comb.pm, lib/HI/Comb/Backend/K8s.pm; old IO::K8s, inspiration only) selected pods by app= label; use the comb label instead.
+
+2026-09-27 05:14 Plan: lib/Kubernetes/Comb.pm. The upstream ctor arg is stored under a private reader (init_arg upstream), because a class method 'upstream' must stay detectable via can() (SPEC §5 step 3); the base class defines no 'upstream'. status = live observation hashref {phase healthy reason message pods}; recorded status (k4) = CombStatus object (crd->status, or in memory without a CR). Hook points for k4/k5: _hook (list or Future), _items/_apply (deploy fails with details {applied}), _resolve_endpoints (k5 redirects), crd rwp writer. Unknown hashref kinds are treated as namespaced; the io_k8s attribute resolves the known ones.
+
+2026-09-27 05:28 Implemented lib/Kubernetes/Comb.pm and tests t/comb.t, t/comb-from-crd.t, t/comb-deploy.t, t/comb-status.t, t/comb-ops.t (+ t/lib/TestComb/{Fixtures,Mailer,Mailer/Stub}.pm). cpanfile: JSON::MaybeXS moved from test to runtime requires (JSON->true for CronJob suspend and status booleans). prove -lr t/ green in unit mode (82 tests, 11 files, no skips) before the last small test addition; key behaviours mutation-checked (readiness, Succeeded skip, stub contract, namespacing, template labels, owned Failed pods, previous logs, Stopped): each mutant killed. Existence checks use label-selected lists, not GET, so the missing-404 upstream gap does not matter here; Job delete has a TODO for propagationPolicy.
+
+2026-09-27 05:28 Done: lib/Kubernetes/Comb.pm (attributes k8s/resolver/upstream(init_arg, private reader)/crd(rwp)/crd_class/namespace/config/label_prefix/managed_by/io_k8s/stub_of; contract with defaults; from_crd with runtime class loading, stub selection and a construction-time stub contract check; deploy/status/healthy/logs/restart/stop/describe/endpoint all returning Futures that never throw; recorded_status = CombStatus from the CR or kept in memory). Tests: t/comb.t, t/comb-from-crd.t, t/comb-deploy.t, t/comb-status.t, t/comb-ops.t plus t/lib/TestComb/*. cpanfile: JSON::MaybeXS is now a runtime requirement. Verified: prove -lr t/ green in unit mode (11 files, 83 tests, no skips, TEST_KUBERNETES_COMB_* unset); key behaviours mutation-checked. Decisions and k4/k5 hook points are in the worker report. Not committed.
+
+2026-09-27 05:31 Committed 0a786dd: lib/Kubernetes/Comb.pm, t/comb.t, t/comb-from-crd.t, t/comb-deploy.t, t/comb-status.t, t/comb-ops.t, t/lib/TestComb/{Fixtures,Mailer,Mailer/Stub}.pm, cpanfile (JSON::MaybeXS moved test->runtime requires). prove -lr t/ green in unit mode (11 files, 83 tests, no skips, TEST_KUBERNETES_COMB_* unset). dzil build clean against the committed tree (main_module correctly guessed as lib/Kubernetes/Comb.pm; all new files present; JSON::MaybeXS in META.json runtime requires).
