@@ -1,0 +1,33 @@
+---
+claimed_at: 2026-09-29T17:19:32Z
+claimed_by: main
+class: standard
+completed: 2026-09-29T17:19:32Z
+created: 2026-09-29T17:12:31Z
+id: 16
+priority: medium
+started: 2026-09-29T17:12:44Z
+status: done
+tags:
+- spec
+- docs
+- release
+title: 'SPEC.md: bring status line, dependencies and open points in line with what
+  was built'
+updated: 2026-09-29T17:19:33Z
+---
+
+Pre-release review 2026-09-29. SPEC.md ships in the tarball and still says "approved design, not yet implemented". Prose only, no design change: record what the code does and what cards 11 and 12 decided.
+
+- Status line.
+- Section 3: contract has optional; Role::Client and Role::Static exist; attributes label_prefix, managed_by, max_upstream_depth, cluster_domain, io_k8s, namespace, config.
+- Section 4: update_status and ensure exist in Net::Async::Kubernetes 0.009.
+- Section 5/7: upstream chain capped by max_upstream_depth (Blocked, UpstreamLoop).
+- Section 7: labels are Comb name, Comb namespace and managed-by; cluster-scoped resources are never pruned; a healthy Comb is not redeployed when only the content of a manifest changed (open, see the design card).
+- Section 9: a Foo::Stub selected through spec.class is checked too.
+- Section 13: versions and the full dependency list as in cpanfile.
+- Section 14: label prefix decided (comb.internal/), Role::Client decided (role plus two classes), upstream work done in Net::Async::Kubernetes 0.009.
+
+SPEC.md edited by the orchestrator, prose only, no design change: status line; section 3 (optional, Role::Client, Role::Static, the attributes); section 4 (update_status/patch_status/ensure are in Net::Async::Kubernetes 0.009; the client-cert item dropped from the list of gaps, the code is there, its live check is card 55 on that board); section 5 (max_upstream_depth); section 7 (namespace label, cluster-scoped never pruned, content changes not redeployed); section 9 (stub through spec.class is checked); section 13 (dependencies as in cpanfile); section 14 split into settled and open. Not committed. Proposed commit subject: Bring SPEC.md in line with what 0.001 implements (k16). No Changes line: SPEC prose.
+
+2026-09-29 17:19 Committed as cde0ff6
