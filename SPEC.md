@@ -1,6 +1,8 @@
 # Kubernetes::Comb — Design Spec
 
-Status: approved design, not yet implemented (2026-09-26).
+Status: approved design (2026-09-26), implemented for 0.001 (2026-09-27).
+Where the implementation settled a point the design left open, the section
+says so; the module POD is the reference for the API.
 
 ## 1. Idea
 
@@ -52,7 +54,8 @@ Non-goals (deliberately left open, must not be designed out):
 ```
 Kubernetes::Comb                    base class: contract + lifecycle, returns Futures
   contract (overridden in subclasses)
-    name, depends_on, endpoints, manifests, check, bridge_manifests, stub_class
+    name, depends_on, endpoints, manifests, check, optional,
+    bridge_manifests, stub_class
     upstream (optional plain method)
   lifecycle
     reconcile, status, healthy, logs, deploy, restart, stop, describe
@@ -63,7 +66,12 @@ Kubernetes::Comb                    base class: contract + lifecycle, returns Fu
     upstream   coderef or spec, see §5
     crd        the Comb custom resource object (optional)
     crd_class  CR class, default Kubernetes::Comb::CRD::Comb
+    namespace, config               default: from the CR
+    label_prefix, managed_by        the labels of §7, default comb.internal/
+    max_upstream_depth              cap on an upstream chain, see §5
+    cluster_domain, io_k8s
 
+Kubernetes::Comb::Role::Client      the request surface every Comb goes through
 Kubernetes::Comb::Client::Sync      wraps Kubernetes::REST, returns done Futures
 Kubernetes::Comb::Client::Async     wraps Net::Async::Kubernetes (optional deps)
 Kubernetes::Comb::Endpoint          value object: name, protocol, port, cluster, external
@@ -71,6 +79,7 @@ Kubernetes::Comb::Role::Upstream    requires status, endpoints; optional replica
 Kubernetes::Comb::Upstream::K8s     read-only: reads the peer Comb CR in another kube context
 Kubernetes::Comb::Upstream::Static  fixed endpoints, no cluster (Docker, vendors, tests)
 Kubernetes::Comb::Static            optional: manifests loaded from .pk8s / YAML files
+Kubernetes::Comb::Role::Static      the same as a role, for the stub of an existing class
 Kubernetes::Comb::CRD::*            IO::K8s classes: Comb, CombSpec, CombStatus,
                                     CombCondition, CombResource, CombEndpoint,
                                     CombUpstreamStatus
@@ -97,9 +106,10 @@ Rules:
   runtime and dies with a clear message naming the missing module.
 - Core code uses plain `->then` chains, no `async sub`, so
   `Future::AsyncAwait` stays optional. User Comb classes may use it freely.
-- Missing features in `Net::Async::Kubernetes` (currently `update_status`,
-  `ensure`, client-cert verification) are fixed
+- Missing features in `Net::Async::Kubernetes` are fixed
   **upstream in Net::Async::Kubernetes**, never worked around in this dist.
+  `update_status`, `patch_status` and `ensure` arrived there with 0.009,
+  which is the version `Client::Async` needs.
 
 ## 5. Upstream (layering)
 
@@ -159,6 +169,10 @@ requires 'endpoints';  # Future → [ Kubernetes::Comb::Endpoint, ... ]
 - Because every Comb publishes its **already resolved** endpoints in
   `status.endpoints`, chains of any depth work without a layer knowing the
   one above its upstream.
+- A chain whose `via` names more than `max_upstream_depth` layers (default
+  16) is taken for a loop: `Blocked`, the recorded `via` cut to that length.
+  Kube context names cannot tell a loop, since layers may share one context
+  (namespaces of one cluster).
 
 ## 6. Custom resource
 
@@ -249,7 +263,17 @@ unreachable → `Blocked` with the reason.
 ### Deploy details
 
 - Every managed resource gets identifying labels (configurable prefix):
-  the Comb name and `app.kubernetes.io/managed-by`.
+  the Comb name, the Comb namespace and `app.kubernetes.io/managed-by`. Name
+  and namespace together tell same-named Combs of different namespaces
+  apart -- the layers of one cluster.
+- Pruning deletes only namespaced resources that still carry both labels of
+  this Comb. A cluster-scoped orphan (a Namespace, a
+  CustomResourceDefinition) is never deleted: it is dropped from the record,
+  left in place, and the status message says so.
+- Only the *set* of resources is compared. A healthy Comb whose manifests
+  changed in content (a new image, a changed `spec.config`) is not deployed
+  again by `reconcile`; `deploy` does it on request. Whether `reconcile`
+  should detect that is open, see §14.
 - `status` is derived from pods: Waiting/Terminated reasons, restart counts,
   scheduling failures (`PodScheduled=False`) end up in conditions/messages.
 - `logs` falls back to the previous container on CrashLoop.
@@ -283,7 +307,9 @@ sub manifests { ... }                      # e.g. a Mailpit container
   (`from_crd($crd, stub => sub { $_[0]->name eq 'mailer' })`) or by pointing
   `spec.class` at the stub class.
 - **The contract is checked at construction**: a stub missing any endpoint
-  name of its original dies immediately with a clear message.
+  name of its original dies immediately with a clear message. That holds
+  however the stub was selected: a class named `Foo::Stub` that is a `Foo`
+  is checked against `Foo` when `spec.class` names it directly, too.
 - Stubs are often just a `.pk8s` file via `Kubernetes::Comb::Static`.
 
 ## 10. Manifests
@@ -322,15 +348,33 @@ sub manifests { ... }                      # e.g. a Mailpit container
 
 ## 13. Dependencies
 
-- requires: `Moo`, `Future`, `IO::K8s` (>= 1.107), `Kubernetes::REST`
-  (>= 1.107, has `update_status`/`patch_status`/`ensure`), `Module::Runtime`
-- recommends: `IO::Async`, `Net::Async::Kubernetes`, `Future::AsyncAwait`
+`cpanfile` is the reference; it names released versions only.
+
+- requires: `Moo`, `Future`, `IO::K8s` (>= 1.108), `Kubernetes::REST`
+  (>= 1.108, has `update_status`/`patch_status`/`ensure`), `Module::Runtime`,
+  `JSON::MaybeXS`, `Path::Tiny`, `Types::Standard` and
+  `Types::Common::Numeric` (Type::Tiny), `namespace::autoclean`
+- recommends: `IO::Async`, `Net::Async::Kubernetes` (>= 0.009),
+  `Future::AsyncAwait`
 - test: `Test::More`
 
-## 14. Open points for implementation
+## 14. Open points
 
-- Exact label key prefix default (proposal: `comb.internal/…`).
-- Whether `Client::Sync`/`Client::Async` are thin enough to be a role
-  (`Kubernetes::Comb::Role::Client`) plus two classes.
-- Upstream PRs to `Net::Async::Kubernetes`: `update_status`, `ensure`,
-  client-cert verification.
+Settled by the implementation:
+
+- Label key prefix: `comb.internal/`, the attribute `label_prefix`.
+- The client is a role, `Kubernetes::Comb::Role::Client`, plus the two
+  classes.
+- `update_status`, `patch_status` and `ensure` are in
+  `Net::Async::Kubernetes` 0.009.
+
+Open:
+
+- Whether `reconcile` deploys a healthy Comb again when its manifests or
+  its `spec.config` changed (§7), and how it would tell: by
+  `metadata.generation` against `status.observedGeneration`, by a digest of
+  the rendered manifests, or both.
+- A stub selected through `spec.class` is checked against its original but
+  has no `stub_of`; whether it should.
+- Deleting a Job leaves its Pods behind until the clients can send a
+  `propagationPolicy` with `delete`.
