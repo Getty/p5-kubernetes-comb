@@ -1,0 +1,40 @@
+---
+claimed_at: 2026-09-29T17:19:31Z
+claimed_by: kubernetes-comb-worker
+class: standard
+completed: 2026-09-29T17:19:31Z
+created: 2026-09-29T17:12:25Z
+id: 14
+priority: high
+started: 2026-09-29T17:12:43Z
+status: done
+tags:
+- client
+- async
+- release
+title: 'Client::Async: refuse a Net::Async::Kubernetes older than 0.009 at load, naming
+  the version'
+updated: 2026-09-29T17:19:31Z
+---
+
+Pre-release review 2026-09-29.
+
+Kubernetes::Comb::Client::Async needs ensure, update_status and patch_status of Net::Async::Kubernetes. Those arrive with 0.009; the version on CPAN is 0.008 and has none of them (checked against the 0.008 tag). The module loads Net::Async::Kubernetes with require_module and no version, so with 0.008 installed it loads fine and every deploy and status write then fails with "Can't locate object method ..." inside a Future -- reconcile reports phase Error with that text.
+
+SPEC section 4: Client::Async "loads them at runtime and dies with a clear message naming the missing module". A too-old module is the same situation.
+
+Wanted:
+- Loading Kubernetes::Comb::Client::Async with Net::Async::Kubernetes < 0.009 dies like the missing-module case, naming the module, the version needed and the version found.
+- t/client-async.t and the async part of t/examples.t skip instead of fail when the installed version is too old; t/client-async-missing.t keeps its claim.
+- A regression test for the too-old case that needs no particular installed version.
+- The unit suite stays green with the released 0.008 on the include path and with 0.009.
+
+Verified before filing: prove -lr t/ is green against the sources of the released tags (IO::K8s 1.108, Kubernetes::REST 1.108, Net::Async::Kubernetes 0.008) -- t/client-async.t passes there because it never calls the missing methods.
+
+2026-09-29 17:15 Started. The released-tag tree of Net::Async::Kubernetes does define its VERSION as 0.008 (line 3 of Net/Async/Kubernetes.pm); the installed one reports 0.009. Regression test t/client-async-too-old.t written first, stand-in modules on a temp include path in child perls: red before the change (0.008 and a module without version both load).
+
+2026-09-29 17:17 Also found, not touched: SPEC.md has uncommitted changes in the working tree that are not from this card (section 4 now names 0.009; the tree was clean when I started, the file changed while I worked). Whoever commits k14 must leave SPEC.md out or decide on it separately. Also: t/examples.t decides the skip in-process but compiles examples/async.pl in a child perl with only -Ilib -Iexamples/lib, so include paths given to prove with -I reach the check and not the child; with PERL5LIB both agree. Harmless for this card (the skip wins), left as it is.
+
+2026-09-29 17:17 Done: Client/Async.pm checks the minimum version of Net::Async::Kubernetes (0.009, stated once, next to the module list) right after loading it and croaks naming module, version needed, version found and the file. A module without a version is refused too. New t/client-async-too-old.t (stand-in modules on a temp include path, child perls; red before, green after). t/client-async.t and the async part of t/examples.t take their skip from the load error through t/lib/TestComb/AsyncClient.pm, so no test repeats the version for skipping. t/client-async-missing.t unchanged. POD of Client::Async extended. Verified, unit mode, both TEST_KUBERNETES_COMB_* unset: prove -lr t/ green with the installed 0.009 (23 files, 217 tests) and with the released-tag sources of 0.008 in front (23 files, 214 tests, t/client-async.t and the async example skipped with the new message). Not committed.
+
+2026-09-29 17:19 Committed as 1a94080
