@@ -6,13 +6,14 @@ use Test::More;
 # -- the example Comb classes, the stub file, combs.yaml -- has to load. No
 # cluster: nothing here builds a client or sends a request.
 
-use lib 'examples/lib';
+use lib 'examples/lib', 't/lib';
 use IO::K8s;
 use IPC::Open3 qw( open3 );
 use Module::Runtime qw( require_module );
 use Path::Tiny qw( path );
 use Kubernetes::Comb;
 use Kubernetes::Comb::CRD;
+use TestComb::AsyncClient qw( async_client_refusal );
 
 # perl -c in a child: the scripts run their BEGIN blocks and use lines, not
 # their code. Output is stdout and stderr together.
@@ -31,9 +32,10 @@ sub compiles {
 }
 
 SKIP: {
-  my @missing = grep { !eval { require_module($_); 1 } }
-    qw( IO::Async::Loop Net::Async::Kubernetes Future::AsyncAwait );
-  skip 'examples/async.pl needs '.join( ', ', @missing ), 1 if @missing;
+  my $refusal = async_client_refusal;
+  skip 'examples/async.pl: '.$refusal, 1 if defined $refusal;
+  skip 'examples/async.pl needs Future::AsyncAwait', 1
+    unless eval { require_module('Future::AsyncAwait'); 1 };
   my ( $ok, $output ) = compiles('examples/async.pl');
   ok $ok, 'examples/async.pl compiles' or diag $output;
 }

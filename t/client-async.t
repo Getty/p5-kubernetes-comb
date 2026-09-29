@@ -2,11 +2,14 @@ use strict;
 use warnings;
 use Test::More;
 
+use lib 't/lib';
+use TestComb::AsyncClient qw( async_client_refusal );
+
+# Skipped where the async client refuses to load: an optional dependency is
+# missing or too old.
 BEGIN {
-  for my $module (qw( IO::Async::Loop Net::Async::Kubernetes )) {
-    plan skip_all => $module.' is not installed (optional dependency)'
-      unless eval "require $module; 1";
-  }
+  my $refusal = async_client_refusal;
+  plan skip_all => $refusal if defined $refusal;
 }
 
 use Path::Tiny qw( tempdir );

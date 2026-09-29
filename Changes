@@ -13,7 +13,8 @@ Revision history for Kubernetes-Comb
    every Comb goes through; Kubernetes::Comb::Client::Sync (on
    Kubernetes::REST) and Kubernetes::Comb::Client::Async (on
    Net::Async::Kubernetes, an optional dependency) implement it, both
-   returning Futures.
+   returning Futures. Client::Async refuses a Net::Async::Kubernetes older
+   than 0.009 when it is loaded, naming the version needed and the one found.
  - Comb lifecycle: from_crd builds an instance from a CR; deploy, status,
    healthy, logs, restart, stop, describe and endpoint each return a Future
    and never throw.

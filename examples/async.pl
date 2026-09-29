@@ -16,7 +16,7 @@ use Path::Tiny qw( path );
 use POSIX qw( strftime );
 use Pod::Usage qw( pod2usage );
 use Kubernetes::Comb;
-use Kubernetes::Comb::Client::Async;   # dies naming IO::Async or Net::Async::Kubernetes if missing
+use Kubernetes::Comb::Client::Async;   # dies naming IO::Async or Net::Async::Kubernetes if missing or too old
 
 my %opt = (
   namespace  => 'comb-demo',

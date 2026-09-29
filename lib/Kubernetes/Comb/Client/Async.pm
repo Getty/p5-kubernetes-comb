@@ -8,17 +8,27 @@ with 'Kubernetes::Comb::Role::Client';
 use Carp qw( croak );
 use Future;
 use IO::K8s;
-use Module::Runtime qw( require_module );
+use Module::Runtime qw( module_notional_filename require_module );
 use Types::Standard qw( InstanceOf Str );
 use Kubernetes::Comb::CRD;
 use namespace::autoclean;
 
 # Optional dependencies (recommends): loaded here, not with `use`, so the
-# rest of the distribution never needs them, and a missing one is named.
-for my $module (qw( IO::Async::Loop Net::Async::Kubernetes )) {
-  next if eval { require_module($module); 1 };
+# rest of the distribution never needs them, and a missing or too old one is
+# named. Each is a module and, where one is needed, its minimum version --
+# the only place in the code that states it.
+for my $optional ( [ 'IO::Async::Loop' ], [ 'Net::Async::Kubernetes', '0.009' ] ) {
+  my ( $module, $minimum ) = @$optional;
   croak __PACKAGE__.' needs '.$module.', an optional dependency of'
-    .' Kubernetes::Comb that is not available: '.$@;
+    .' Kubernetes::Comb that is not available: '.$@
+    unless eval { require_module($module); 1 };
+  next unless defined $minimum;
+  next if eval { $module->VERSION($minimum); 1 };
+  my $found = $module->VERSION;
+  croak __PACKAGE__.' needs '.$module.' '.$minimum.' or newer, an optional'
+    .' dependency of Kubernetes::Comb, and found '
+    .( defined $found ? $found : 'one without a version' )
+    .' in '.$INC{ module_notional_filename($module) };
 }
 
 =synopsis
@@ -46,7 +56,9 @@ instead of failing -- bad arguments to C<update>, C<update_status>, C<ensure>
 L<IO::Async> and L<Net::Async::Kubernetes> are optional dependencies of
 Kubernetes::Comb. Loading this module without them dies with a message naming
 the missing one. The client needs L<Net::Async::Kubernetes> 0.009 for
-C<ensure>, C<update_status> and C<patch_status>.
+C<ensure>, C<update_status> and C<patch_status>, and an older one is refused
+the same way, when this module is loaded: the message names the version
+needed, the version found and the file it was found in.
 
 =cut
 
