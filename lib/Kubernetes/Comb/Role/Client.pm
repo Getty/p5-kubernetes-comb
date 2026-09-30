@@ -73,9 +73,12 @@ digest.
 
   my $f = $client->delete('Service', 'nats', namespace => 'platform');
   my $f = $client->delete($object);
+  my $f = $client->delete($job, propagationPolicy => 'Background');
 
-Future of C<1>. Neither L<Kubernetes::REST> nor L<Net::Async::Kubernetes>
-sends a C<propagationPolicy> yet, so deleting a Job leaves its Pods behind.
+Future of C<1>. C<propagationPolicy> (C<Background>, C<Foreground> or
+C<Orphan>) decides what becomes of the objects the deleted one owns; without
+it the API server orphans the Pods of a Job. Any other option fails the
+Future.
 
 =method update
 

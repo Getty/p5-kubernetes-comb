@@ -4,6 +4,7 @@ use Test::More;
 
 use JSON::MaybeXS qw( decode_json encode_json );
 use Path::Tiny qw( tempdir );
+use IO::K8s;
 use Kubernetes::REST;
 use Kubernetes::REST::HTTPResponse;
 use Kubernetes::Comb::Client::Sync;
@@ -83,6 +84,26 @@ subtest 'get' => sub {
   is $f->get->status->phase, 'Running', 'inflated';
   is $io->last_request->method, 'GET', 'GET';
   is $io->last_request->url, $server.'/api/v1/namespaces/platform/pods/nats-0', 'path';
+};
+
+subtest 'delete with propagationPolicy' => sub {
+  my ( $k8s, $io ) = client();
+  my $jobs = $server.'/apis/batch/v1/namespaces/platform/jobs';
+  $io->respond( ( [ 200, { kind => 'Status', status => 'Success' } ] ) x 2 );
+  is $k8s->delete( 'Job', 'nats-init', namespace => 'platform', propagationPolicy => 'Background' )->get, 1,
+    'by name';
+  is $io->last_request->url, $jobs.'/nats-init?propagationPolicy=Background', 'sent as query parameter';
+
+  my $job = IO::K8s->new->new_object( Job => {
+    metadata => { name => 'nats-init', namespace => 'platform' }
+  } );
+  is $k8s->delete( $job, propagationPolicy => 'Background' )->get, 1, 'object form';
+  is $io->last_request->url, $jobs.'/nats-init?propagationPolicy=Background', '... sent too';
+
+  my $f = eval { $k8s->delete( $job, propagationPolicy => 'Backgroud' ) };
+  ok $f && $f->is_failed, 'an unknown value fails the Future, nothing is thrown';
+  like $f->failure, qr/Unknown propagationPolicy 'Backgroud'/, '... naming it';
+  is scalar( () = $io->requests ), 2, 'and nothing is sent';
 };
 
 subtest 'API errors and bad arguments become failed Futures' => sub {

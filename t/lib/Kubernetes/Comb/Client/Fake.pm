@@ -276,6 +276,8 @@ C<update_status>, C<patch_status>, C<log>, C<server_url> and C<for_context>
 as in L<Kubernetes::Comb::Role::Client>. L</for_context> returns the client
 given in L</contexts>; for any other context one whose requests fail with
 C<Context not found: E<lt>nameE<gt>> and whose C<server_url> croaks with it.
+C<delete> takes C<propagationPolicy> as L<Kubernetes::REST> does; an unknown
+value or any other option fails the call.
 
 =cut
 
@@ -416,17 +418,26 @@ sub _do_log {
   return $text;
 }
 
+# As Kubernetes::REST: propagationPolicy is the only option, and only one of
+# the values the API server knows -- a misspelt one fails, it is not dropped.
 sub _do_delete {
   my ( $self, $target, @rest ) = @_;
-  my ( $class, $kind, $namespace, $name );
+  my ( $class, $kind, $namespace, $name, %args );
   if ( blessed $target ) {
     my $meta = $self->_meta( delete => $target );
     ( $class, $kind, $namespace, $name ) = ( ref $target, $target->kind, $meta->namespace, $meta->name );
+    croak 'Invalid arguments to delete()' if @rest % 2;
+    %args = @rest;
   }
   else {
-    my %args = $self->_name_args( delete => @rest );
+    %args = $self->_name_args( delete => @rest );
     ( $class, $kind, $namespace, $name ) = ( $self->_class_of($target), $target, $args{namespace}, $args{name} );
+    delete @args{qw( name namespace )};
   }
+  my $policy = delete $args{propagationPolicy};
+  croak 'Unknown argument(s) to delete(): '.join( ', ', sort keys %args ) if %args;
+  croak 'Unknown propagationPolicy \''.$policy.'\' for delete() (use: Background, Foreground, Orphan)'
+    if defined $policy && $policy !~ /\A(?:Background|Foreground|Orphan)\z/;
   $self->_find( delete => $class, $kind, $namespace, $name );
   delete $self->_bucket($class)->{ $namespace // '' }{$name};
   return 1;

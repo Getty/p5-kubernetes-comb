@@ -737,15 +737,16 @@ Not healthy: L</deploy>, then prune: every namespaced resource this Comb
 recorded in C<managedResources> that it no longer renders -- compared by
 group, kind, namespace and name, so a new API version is no orphan -- is
 deleted if it still carries L</label_selector>, name and namespace of this
-Comb. One that does not -- it lost the labels, or a same-named Comb of
-another namespace applied it last -- is left alone and dropped from the
-record, one that is gone is dropped, one that fails to delete stays for the
-next step. A cluster-scoped one is never deleted: a Namespace or a
-CustomResourceDefinition takes far more with it, and a same-named Comb of
-another namespace may render it too. It is dropped from the record and left
-in place, which the C<Ready> message says. Then C<Pending>. A deploy that
-fails half-way is an C<Error> that records what it applied on top of the
-previous record, and prunes nothing.
+Comb, together with what it owns (C<propagationPolicy> C<Background>: the
+Pods of a Job, the ReplicaSets of a Deployment). One that does not -- it
+lost the labels, or a same-named Comb of another namespace applied it last
+-- is left alone and dropped from the record, one that is gone is dropped,
+one that fails to delete stays for the next step. A cluster-scoped one is
+never deleted: a Namespace or a CustomResourceDefinition takes far more with
+it, and a same-named Comb of another namespace may render it too. It is
+dropped from the record and left in place, which the C<Ready> message
+says. Then C<Pending>. A deploy that fails half-way is an C<Error> that
+records what it applied on top of the previous record, and prunes nothing.
 
 Healthy, but a resource was applied from another manifest than the one
 rendered now -- a new image in the class, a changed C<spec.config> the
@@ -1009,8 +1010,9 @@ sub restart {
 
 Rolling restart: sets L</restart_annotation> to the current time (RFC 3339)
 on the Pod template of every Deployment, StatefulSet and DaemonSet of the
-Comb; deletes its Jobs. Future of the list of what it touched, as
-C<Kind/name>. L</deploy> -- and so L</reconcile> -- keeps the annotation.
+Comb; deletes its Jobs together with their Pods. Future of the list of what
+it touched, as C<Kind/name>. L</deploy> -- and so L</reconcile> -- keeps the
+annotation.
 
 =cut
 
@@ -1032,9 +1034,9 @@ sub stop {
 =method stop
 
 Scales the Deployments and StatefulSets of the Comb to 0, suspends its
-CronJobs and deletes its Jobs. Future of the list of what it touched, as
-C<Kind/name>. L</status> is C<Stopped> then; the next L</reconcile> deploys
-the Comb again.
+CronJobs and deletes its Jobs together with their Pods. Future of the list
+of what it touched, as C<Kind/name>. L</status> is C<Stopped> then; the next
+L</reconcile> deploys the Comb again.
 
 =cut
 
@@ -1641,13 +1643,11 @@ sub _each_workload {
   } @actions );
 }
 
-# TODO: Kubernetes::REST and Net::Async::Kubernetes cannot send a
-# propagationPolicy with delete yet (tickets on the kubernetes-rest and
-# p5-net-async-kubernetes boards), so the deleted Job's Pods stay behind.
-# Pass propagationPolicy => 'Background' here once they can.
+# Background: without a propagationPolicy the API server orphans the Pods of
+# a deleted batch/v1 Job.
 sub _delete_job {
   my ( $self ) = @_;
-  return sub { $self->k8s->delete( $_[0] ) };
+  return sub { $self->k8s->delete( $_[0], propagationPolicy => 'Background' ) };
 }
 
 # The endpoints as they are reached now: the local ones, or with an active
@@ -2373,9 +2373,10 @@ sub _union {
 
 # Future of { resource, keep, note } per orphan; never fails. A
 # cluster-scoped orphan is left in place. An orphan that still carries the
-# Comb labels is deleted. One that does not is gone or no longer this Comb's
-# -- not ours to delete either way. A failed check or delete keeps it for the
-# next step.
+# Comb labels is deleted, with propagationPolicy Background: what it owns --
+# the Pods of a Job, the ReplicaSets of a Deployment -- goes with it. One
+# that does not carry them is gone or no longer this Comb's -- not ours to
+# delete either way. A failed check or delete keeps it for the next step.
 sub _prune {
   my ( $self, @orphans ) = @_;
   my ( @left, %groups );
@@ -2429,7 +2430,7 @@ sub _cluster_scoped {
 sub _prune_one {
   my ( $self, $resource, $orphan, $live ) = @_;
   my $what = $orphan->{kind}.' '.$orphan->{name};
-  return $self->k8s->delete($live)->then(
+  return $self->k8s->delete( $live, propagationPolicy => 'Background' )->then(
     sub { Future->done( { resource => $orphan, keep => 0 } ) },
     sub {
       Future->done( {

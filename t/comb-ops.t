@@ -115,6 +115,9 @@ subtest 'restart' => sub {
   ok !$k8s->object( 'Deployment', 'other', namespace => 'platform' )->spec->template->metadata->annotations,
     'another Comb\'s Deployment is untouched';
   is_deeply [ map { +{ @{$_}[ 1 .. $#$_ ] }->{type} } $k8s->calls_of('patch') ], [ ('merge') x 3 ], 'merge patches';
+  is_deeply [ map { [ $_->[0]->metadata->name, @{$_}[ 1 .. $#$_ ] ] } $k8s->calls_of('delete') ],
+    [ [ 'nats-init', propagationPolicy => 'Background' ] ],
+    'the Job is deleted with its Pods: propagationPolicy Background';
   ok $k8s->object( 'Deployment', 'nats', namespace => 'platform' )->spec->template->spec->containers,
     'the rest of the pod template is kept';
 };
@@ -129,6 +132,9 @@ subtest 'stop' => sub {
   is $k8s->object( 'StatefulSet', 'nats-store', namespace => 'platform' )->spec->replicas, 0, 'StatefulSet at 0';
   ok $k8s->object( 'CronJob', 'nats-backup', namespace => 'platform' )->spec->suspend, 'CronJob suspended';
   ok !$k8s->object( 'Job', 'nats-init', namespace => 'platform' ), 'Job deleted';
+  is_deeply [ map { [ $_->[0]->metadata->name, @{$_}[ 1 .. $#$_ ] ] } $k8s->calls_of('delete') ],
+    [ [ 'nats-init', propagationPolicy => 'Background' ] ],
+    '... with its Pods: propagationPolicy Background';
   ok !$k8s->object( 'DaemonSet', 'nats-agent', namespace => 'platform' )->spec->template->metadata->annotations,
     'the DaemonSet is left alone';
   is $k8s->object( 'Deployment', 'other', namespace => 'platform' )->spec->replicas, undef,

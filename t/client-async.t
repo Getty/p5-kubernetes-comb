@@ -72,6 +72,35 @@ subtest 'nothing is thrown' => sub {
   like $f->failure, qr/Context not found: nope/, '... naming the context';
 };
 
+# Net::Async::Kubernetes whose delete records its arguments instead of
+# sending anything.
+{
+  package Local::Kube;
+  our @ISA = ('Net::Async::Kubernetes');
+  our @deletes;
+  sub delete { my ( $self, @args ) = @_; push @deletes, \@args; Future->done(1) }
+}
+
+subtest 'delete passes propagationPolicy on' => sub {
+  my $kube = Local::Kube->new(
+    server      => { endpoint => 'https://mine.example:6443' },
+    credentials => { token => 'x' }
+  );
+  $loop->add($kube);
+  my $k8s = Kubernetes::Comb::Client::Async->new( kube => $kube );
+  is $k8s->delete( 'Job', 'nats-init', namespace => 'platform', propagationPolicy => 'Background' )->get, 1,
+    'resolves to 1';
+  is_deeply \@Local::Kube::deletes, [ [ 'Job', 'nats-init', namespace => 'platform', propagationPolicy => 'Background' ] ],
+    'the arguments reach Net::Async::Kubernetes as given';
+  $loop->remove($kube);
+
+  # A real one checks the value before it sends anything.
+  $k8s = Kubernetes::Comb::Client::Async->new( loop => $loop, kubeconfig => "$kubeconfig" );
+  my $f = eval { $k8s->delete( 'Job', 'nats-init', namespace => 'platform', propagationPolicy => 'Backgroud' ) };
+  ok $f && $f->is_failed, 'an unknown value fails the Future';
+  like $f->failure, qr/Unknown propagationPolicy 'Backgroud'/, '... naming it: the option reaches Net::Async::Kubernetes';
+};
+
 subtest 'a ready Net::Async::Kubernetes' => sub {
   my $kube = Net::Async::Kubernetes->new(
     server      => { endpoint => 'https://mine.example:6443' },

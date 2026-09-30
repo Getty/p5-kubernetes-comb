@@ -365,8 +365,10 @@ sub manifests { ... }                      # e.g. a Mailpit container
 
 `cpanfile` is the reference; it names released versions only.
 
-- requires: `Moo`, `Future`, `IO::K8s` (>= 1.108), `Kubernetes::REST`
-  (>= 1.108, has `update_status`/`patch_status`/`ensure`), `Module::Runtime`,
+- requires: `Moo`, `Future`, `IO::K8s` (>= 1.109, quotes YAML 1.1
+  booleans in `to_yaml`), `Kubernetes::REST` (>= 1.109, has
+  `update_status`/`patch_status`/`ensure` and `delete` with
+  `propagationPolicy`), `Module::Runtime`,
   `JSON::MaybeXS`, `Path::Tiny`, `Types::Standard` and
   `Types::Common::Numeric` (Type::Tiny), `namespace::autoclean`
 - recommends: `IO::Async`, `Net::Async::Kubernetes` (>= 0.009),
@@ -382,6 +384,9 @@ Settled by the implementation:
   classes.
 - `update_status`, `patch_status` and `ensure` are in
   `Net::Async::Kubernetes` 0.009.
+- `delete` takes `propagationPolicy` in `Kubernetes::REST` 1.109 and
+  `Net::Async::Kubernetes` 0.009: `restart`, `stop` and pruning delete with
+  `Background`, so the Pods of a Job go with it.
 
 Decided after the first implementation (2026-09-29):
 
@@ -394,5 +399,3 @@ Open:
 
 - A stub selected through `spec.class` is checked against its original but
   has no `stub_of`; whether it should.
-- Deleting a Job leaves its Pods behind until the clients can send a
-  `propagationPolicy` with `delete`.

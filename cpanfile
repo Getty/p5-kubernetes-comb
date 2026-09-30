@@ -1,7 +1,7 @@
 requires 'Future';
-requires 'IO::K8s', '1.108';
+requires 'IO::K8s', '1.109';
 requires 'JSON::MaybeXS';
-requires 'Kubernetes::REST', '1.108';
+requires 'Kubernetes::REST', '1.109';
 requires 'Module::Runtime';
 requires 'Moo';
 requires 'namespace::autoclean';

@@ -59,6 +59,25 @@ subtest 'an orphan that carries the label is deleted' => sub {
   unlike ready_message($status), qr/old/, 'nothing to report';
 };
 
+subtest 'an orphan is deleted with what it owns' => sub {
+  my %job = ( apiVersion => 'batch/v1', kind => 'Job', namespace => 'platform', name => 'nats-init' );
+  my ( $comb, $k8s ) = comb( {%job} );
+  $k8s->add( {
+    apiVersion => 'batch/v1',
+    kind       => 'Job',
+    metadata   => { name => 'nats-init', namespace => 'platform', labels => {%labels} },
+    spec       => { template => { spec => { restartPolicy => 'Never', containers => [ { name => 'init', image => 'img' } ] } } }
+  } );
+
+  my $status = $comb->reconcile->get;
+  is $status->phase, 'Pending', 'Pending';
+  is_deeply [ map { [ $_->[0]->kind.'/'.$_->[0]->metadata->name, @{$_}[ 1 .. $#$_ ] ] } $k8s->calls_of('delete') ],
+    [ [ 'Job/nats-init', propagationPolicy => 'Background' ] ],
+    'the pruned Job is deleted with propagationPolicy Background: its Pods go too';
+  ok !$k8s->object( Job => 'nats-init', namespace => 'platform' ), 'gone from the cluster';
+  is_deeply managed($status), [ {%deployment_nats} ], 'and from managedResources';
+};
+
 subtest 'an orphan without the label is never deleted' => sub {
   my %shared = ( apiVersion => 'v1', kind => 'Service', namespace => 'platform', name => 'shared' );
   my %taken  = ( apiVersion => 'v1', kind => 'Service', namespace => 'platform', name => 'taken' );

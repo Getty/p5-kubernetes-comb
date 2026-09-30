@@ -242,6 +242,23 @@ subtest 'delete' => sub {
   like $again->failure, qr/\AKubernetes API error \(delete Pod\): 404 /, 'deleting a missing object fails';
 };
 
+subtest 'delete takes propagationPolicy, as the real clients do' => sub {
+  my $k8s = fake( objects => [ pod('a'), pod('b'), pod('c') ] );
+  ok $k8s->delete( 'Pod', 'a', namespace => 'platform', propagationPolicy => 'Background' )->is_done,
+    'by name';
+  ok $k8s->delete( $k8s->object( 'Pod', 'b', namespace => 'platform' ), propagationPolicy => 'Orphan' )->is_done,
+    'object form';
+
+  my $c = $k8s->object( 'Pod', 'c', namespace => 'platform' );
+  like $k8s->delete( $c, propagationPolicy => 'Backgroud' )->failure,
+    qr/\AUnknown propagationPolicy 'Backgroud' for delete\(\)/, 'an unknown value fails';
+  like $k8s->delete( $c, propagation => 'Background' )->failure,
+    qr/\AUnknown argument\(s\) to delete\(\): propagation /, 'so does an unknown option';
+  like $k8s->delete( 'Pod', 'c', namespace => 'platform', dryRun => 'All' )->failure,
+    qr/\AUnknown argument\(s\) to delete\(\): dryRun /, '... by name too';
+  ok $k8s->object( 'Pod', 'c', namespace => 'platform' ), 'and nothing is deleted';
+};
+
 subtest 'log' => sub {
   my $k8s = fake();
   $k8s->set_log( name => 'nats-0', namespace => 'platform', text => "one\ntwo\nthree\n" );

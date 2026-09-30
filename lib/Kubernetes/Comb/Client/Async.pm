@@ -56,9 +56,10 @@ instead of failing -- bad arguments to C<update>, C<update_status>, C<ensure>
 L<IO::Async> and L<Net::Async::Kubernetes> are optional dependencies of
 Kubernetes::Comb. Loading this module without them dies with a message naming
 the missing one. The client needs L<Net::Async::Kubernetes> 0.009 for
-C<ensure>, C<update_status> and C<patch_status>, and an older one is refused
-the same way, when this module is loaded: the message names the version
-needed, the version found and the file it was found in.
+C<ensure>, C<update_status>, C<patch_status> and C<delete> with a
+C<propagationPolicy>, and an older one is refused the same way, when this
+module is loaded: the message names the version needed, the version found
+and the file it was found in.
 
 =cut
 
