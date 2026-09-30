@@ -1,0 +1,22 @@
+---
+claimed_at: 2026-09-30T16:24:51Z
+claimed_by: kubernetes-comb-worker
+class: standard
+completed: 2026-09-30T16:24:47Z
+created: 2026-09-30T16:23:20Z
+id: 20
+priority: high
+started: 2026-09-30T16:23:48Z
+status: done
+tags:
+- crd
+- io-k8s
+title: CombSpec config/upstream als Opaque deklarieren
+updated: 2026-09-30T16:24:51Z
+---
+
+IO::K8s 1.109 macht { Str => 1 } zur echten String-Map (TO_JSON stringifiziert, Ref-Wert => Deprecation). config und upstream in lib/Kubernetes/Comb/CRD/CombSpec.pm sind frei geformt => Opaque (IO::K8s::Types). preserve_unknown/nullable/description behalten. Weitere { Str => 1 } in lib/: keine. Test: t/crd.t gruen, Round-Trip ohne Deprecation-Warnung. Changes-Eintrag.
+
+2026-09-30 16:24 CombSpec config+upstream now Opaque (IO::K8s::Types). t/crd.t: regression assertion catches warnings in round-trip subtest (fails with old { Str => 1 }, passes now). Unit mode only, t/crd.t green; no integration.
+
+2026-09-30 16:24 Committed 9caf974. Note: cpanfile pins IO::K8s 1.108 but Opaque needs 1.109 (not yet on CPAN, cpanm --info = 1.108); pin to be staged before release.
