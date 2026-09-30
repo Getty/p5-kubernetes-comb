@@ -1,0 +1,26 @@
+---
+claimed_at: 2026-09-30T06:06:45Z
+claimed_by: p5-kubernetes-comb
+class: standard
+created: 2026-09-29T17:12:36Z
+id: 18
+priority: high
+status: backlog
+tags:
+- release
+- maintainer
+title: 'Release prerequisites only the maintainer can provide: GitHub repository,
+  integration run, go-ahead'
+updated: 2026-09-30T06:06:45Z
+---
+
+Pre-release review 2026-09-29.
+
+1. The repository has no git remote, and github.com/Getty/p5-kubernetes-comb does not exist. The built META.json has empty resources.repository and resources.bugtracker, and .github/workflows/ci.yml has never run.
+2. t/integration/comb.t has never run against a cluster (card 8 says so). Nothing in this distribution has talked to a real API server yet: CRD install, update_status through the status subresource, ensure replacing live objects, the ClusterIP -> ExternalName switch of the bridge, the EndpointSlice bridge, pruning. It needs TEST_KUBERNETES_COMB_KUBECONFIG set by a human, pointing at a throwaway cluster.
+3. Release order: IO::K8s, Kubernetes::REST, Net::Async::Kubernetes, then Kubernetes::Comb.
+4. The release itself needs the maintainer's explicit go-ahead.
+
+2026-09-30: integration suite ran against a throwaway kwok cluster (real kube-apiserver v1.36.1, etcd, controller-manager, scheduler; simulated kubelets): CRD install, reconcile to Running, status/logs/restart/stop, Job deletion with its Pods, ClusterIP -> ExternalName bridge and back, Upstream::K8s across two contexts of one API server — 8/8 green after the k19 test fixes. examples/sync.pl and examples/async.pl drove the demo Combs to Running there, and a changed spec.config rolled out via the applied digest. Not covered: a real kubelet (container logs, image pulls), a peer on another API server with an external address.
+
+2026-09-30 06:06 GitHub repo exists now (origin/main at cde0ff6, local main 5 ahead, not pushed). Integration suite 8/8 green on kwok, also against the dzil-installed stack. Left for the maintainer: push, CI, release go-ahead.
