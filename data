@@ -1,0 +1,38 @@
+---
+claimed_at: 2026-09-30T05:06:22Z
+claimed_by: kubernetes-comb-worker
+class: standard
+completed: 2026-09-30T05:06:22Z
+created: 2026-09-29T17:12:28Z
+id: 15
+priority: medium
+started: 2026-09-30T04:55:10Z
+status: done
+tags:
+- deps
+- release
+- blocked
+title: 'After the sibling releases: depend on them, delete Jobs with propagationPolicy
+  Background'
+updated: 2026-09-30T05:06:22Z
+---
+
+Pre-release review 2026-09-29. Blocked until IO::K8s, Kubernetes::REST and Net::Async::Kubernetes are released to CPAN; cpanfile must only name released versions.
+
+State on 2026-09-29: CPAN has IO::K8s 1.108, Kubernetes::REST 1.108, Net::Async::Kubernetes 0.008. The repos hold 1.109 / 1.109 / 0.009 unreleased (50 / 40 / 44 commits since the tags).
+
+1. cpanfile recommends Net::Async::Kubernetes 0.009, which does not exist on CPAN. Client::Async cannot work with 0.008 (no ensure, update_status, patch_status). So Net::Async::Kubernetes 0.009 has to be out before Kubernetes::Comb.
+2. lib/Kubernetes/Comb.pm _delete_job carries a TODO: delete cannot send propagationPolicy, so the Pods of a deleted Job stay behind (restart, stop). Kubernetes::REST 1.109 and Net::Async::Kubernetes 0.009 take propagationPolicy => "Background". Once released: pass it, drop the TODO and the sentence in Role::Client POD, raise the pins to the versions that carry it. Kubernetes::REST 1.108 ignores unknown delete arguments silently, so the pin has to move with the code.
+3. io-k8s-p5 card 188 (to_yaml leaves True/False/yes/No unquoted): the CRD install path the examples document goes through to_yaml. Pin IO::K8s to the release that fixes it.
+
+2026-09-30 04:55 Maintainer 2026-09-30: IO::K8s 1.109, Kubernetes::REST 1.109, Net::Async::Kubernetes 0.009 are released before Kubernetes::Comb. Orchestrator verified: REST 1.109 and NAK 0.009 take propagationPolicy on delete. Card unblocked.
+
+2026-09-30 04:56 Worker: both clients forward delete args verbatim (_call), so only _delete_job, the fake, POD, cpanfile and tests change. Installed: IO::K8s 1.109, Kubernetes::REST 1.109, NAK 0.009.
+
+2026-09-30 04:58 Also found (out of scope, not changed): _prune_one (lib/Kubernetes/Comb.pm ~2430) deletes an orphaned resource with a bare k8s->delete($live). A pruned Job -- one the Comb no longer renders -- therefore still leaves its Pods behind. Passing propagationPolicy => 'Background' there (valid for every kind) would close it; the maintainer decides.
+
+2026-09-30 04:58 Done: _delete_job passes propagationPolicy => 'Background' (TODO dropped). Both real clients forward delete args verbatim, so no client code change; Role::Client delete POD, restart/stop POD and Client::Async 0.009 reason updated. Fake client delete now accepts only propagationPolicy with Background/Foreground/Orphan, as Kubernetes::REST 1.109. Tests: comb-ops.t (restart and stop delete the Job with Background; red with the fix reverted), client-sync.t (query parameter sent in both forms; a bad value fails without a request), client-async.t (args reach NAK as given; real NAK 0.009 rejects a bad value), client-fake.t. cpanfile: IO::K8s 1.109, Kubernetes::REST 1.109; NAK recommends and runtime minimum stay 0.009. prove -lr t/ unit mode: Files=24 Tests=237 PASS, only t/integration/comb.t skipped (no kubeconfig). Stale: SPEC.md 397-398 (§14 Open item). Not committed.
+
+2026-09-30 05:05 Pruning gap included (coordinator): _prune_one deletes an orphan with propagationPolicy => 'Background', so what it owns (Job Pods, Deployment ReplicaSets) goes with it. reconcile POD (5a prune paragraph) and the _prune comment say so. Regression test in t/reconcile-prune.t 'an orphan is deleted with what it owns' (pruned Job, Background); red with the fix reverted. prove -lr t/ unit mode: Files=24 Tests=238 PASS, only t/integration/comb.t skipped. SPEC.md diff in the tree is the coordinator's, untouched by me. Stays in review.
+
+Committed as dc37d94
