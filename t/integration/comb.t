@@ -4,7 +4,11 @@ use Test::More;
 
 # Integration test: a real cluster, SPEC section 12. Never run on its own
 # initiative -- only with TEST_KUBERNETES_COMB_KUBECONFIG set by a human, and
-# the cross-context part additionally with TEST_KUBERNETES_COMB_UPSTREAM_CONTEXT.
+# the cross-context part additionally with TEST_KUBERNETES_COMB_UPSTREAM_CONTEXT,
+# which must name a context that reaches the SAME API server as the kubeconfig
+# (another context of it, e.g. an alias with other credentials): a context of
+# another API server ends Blocked, as SPEC section 7 says -- the peer publishes
+# no external address.
 # This file must never set either variable itself.
 
 use Kubernetes::Comb::Client::Sync;
@@ -184,16 +188,83 @@ subtest 'back to local' => sub {
   is $status->phase, 'Running', 'local again: Running';
 
   my $service = live_json( $k8s, 'Service', $name, namespace => $ns );
-  is $service->{spec}{type}, undef, 'the Service is a plain ClusterIP Service again';
+  # The API server defaults a Service's type to ClusterIP; what must be gone
+  # is the bridge.
+  is $service->{spec}{type}, 'ClusterIP', 'the Service is a plain ClusterIP Service again';
+  ok !$service->{spec}{externalName}, 'and no externalName';
   ok $service->{spec}{clusterIP}, 'a fresh clusterIP was allocated';
   ok live_json( $k8s, 'Deployment', $name, namespace => $ns ), 'the Deployment is back';
 };
+
+# k15: stop and restart delete a Job with propagationPolicy Background, so the
+# API server's garbage collector removes its Pods too. Asynchronous, hence the
+# bounded wait. A Comb of its own, no custom resource needed.
+{
+  package IntegrationTest::JobComb;
+  use Moo;
+  extends 'Kubernetes::Comb';
+
+  sub name { 'jobby' }
+
+  sub manifests {
+    my ( $self ) = @_;
+    return ( {
+      apiVersion => 'batch/v1',
+      kind       => 'Job',
+      metadata   => { name => $self->name },
+      spec       => {
+        template => {
+          spec => {
+            restartPolicy => 'Never',
+            containers    => [ { name => 'main', image => 'busybox:1.36', command => [ 'sleep', '3600' ] } ]
+          }
+        }
+      }
+    } );
+  }
+
+  sub endpoints { () }
+}
+
+sub job_pods {
+  my ( $comb ) = @_;
+  my $list = $k8s->list( 'v1/Pod', namespace => $ns, labelSelector => $comb->label_selector )->get;
+  return scalar @{ $list->items // [] };
+}
+
+# Polls $check up to $tries times, $delay seconds apart; true as soon as it is.
+sub wait_for {
+  my ( $check, %args ) = @_;
+  my $tries = $args{tries} // 30;
+  my $delay = $args{delay} // 2;
+  for ( 1 .. $tries ) {
+    return 1 if $check->();
+    sleep $delay;
+  }
+  return 0;
+}
+
+for my $op (qw( stop restart )) {
+  subtest 'a Job and its Pods are deleted together by '.$op => sub {
+    my $jobber = IntegrationTest::JobComb->new( k8s => $k8s, namespace => $ns );
+    $jobber->reconcile->get;
+    ok live_json( $k8s, 'Job', 'jobby', namespace => $ns ), 'the Job exists';
+    ok wait_for( sub { job_pods($jobber) > 0 } ), 'the Job has created a Pod within the bounded wait'
+      or return;
+
+    my @touched = $jobber->$op->get;
+    ok( ( grep { $_ eq 'Job/jobby' } @touched ), $op.' touched the Job' );
+    ok wait_for( sub { !live_json( $k8s, 'Job', 'jobby', namespace => $ns ) } ), 'the Job is gone';
+    ok wait_for( sub { job_pods($jobber) == 0 } ), 'its Pods are gone too (garbage collected, not orphaned)'
+      or diag job_pods($jobber).' Pod(s) left';
+  };
+}
 
 # The layering path: a peer Comb reconciled for real in another kube
 # context, borrowed from through Kubernetes::Comb::Upstream::K8s. Only with
 # the second env var -- never set here.
 SKIP: {
-  skip 'set TEST_KUBERNETES_COMB_UPSTREAM_CONTEXT (a context of the same kubeconfig) to also exercise'
+  skip 'set TEST_KUBERNETES_COMB_UPSTREAM_CONTEXT (a context reaching the SAME API server as the kubeconfig) to also exercise'
     .' Kubernetes::Comb::Upstream::K8s against a real peer', 1
     unless $ENV{TEST_KUBERNETES_COMB_UPSTREAM_CONTEXT};
 
