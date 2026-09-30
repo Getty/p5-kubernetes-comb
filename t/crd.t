@@ -87,12 +87,15 @@ subtest 'SPEC example inflates to the typed classes' => sub {
 };
 
 subtest 'SPEC example survives a JSON round trip' => sub {
+  my @warnings;
+  local $SIG{__WARN__} = sub { push @warnings, @_ };
   my $cr = $k8s->inflate($spec_example);
   is $json->encode( decode_json( $cr->to_json ) ),
      $json->encode( decode_json($spec_example) ),
      'TO_JSON reproduces the document';
   my $again = Kubernetes::Comb::CRD::Comb->from_json( $cr->to_json );
   is $again->to_json, $cr->to_json, 'from_json of to_json is stable';
+  is_deeply \@warnings, [], 'no deprecation or stringify warnings for config/upstream';
 };
 
 subtest 'spec.upstream: absent, null and set stay apart' => sub {

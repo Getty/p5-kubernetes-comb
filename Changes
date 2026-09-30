@@ -9,6 +9,8 @@ Revision history for Kubernetes-Comb
    spec and status conditions; Kubernetes::Comb::CRD generates the IO::K8s
    resource map for it; Kubernetes::Comb::Endpoint is the resolved-endpoint
    value object.
+ - spec.config and spec.upstream are free-form: declared as IO::K8s Opaque, so
+   nested values round-trip through the CR untouched (needs IO::K8s 1.109).
  - Client seam: Kubernetes::Comb::Role::Client defines the request surface
    every Comb goes through; Kubernetes::Comb::Client::Sync (on
    Kubernetes::REST) and Kubernetes::Comb::Client::Async (on

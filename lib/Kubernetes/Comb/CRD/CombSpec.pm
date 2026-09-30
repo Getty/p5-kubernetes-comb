@@ -3,6 +3,7 @@ package Kubernetes::Comb::CRD::CombSpec;
 our $VERSION = '0.001';
 
 use IO::K8s::Resource;
+use IO::K8s::Types qw( Opaque );
 use Carp qw( croak );
 
 =synopsis
@@ -64,7 +65,7 @@ ArrayRef of the Combs this one depends on, each C<name> or C<namespace/name>.
 
 =cut
 
-k8s config => { Str => 1 }, {
+k8s config => Opaque, {
   preserve_unknown => 1,
   description      => 'Free-form configuration for the class'
 };
@@ -85,7 +86,7 @@ Tri-state: C<undef> is automatic, false switches the Comb off, true on.
 
 =cut
 
-k8s upstream => { Str => 1 }, {
+k8s upstream => Opaque, {
   nullable         => 1,
   preserve_unknown => 1,
   description      => 'Where the Comb borrows its service from: class plus'
