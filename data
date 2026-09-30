@@ -1,0 +1,43 @@
+---
+claimed_at: 2026-09-29T18:36:46Z
+claimed_by: kubernetes-comb-worker
+class: standard
+completed: 2026-09-30T04:35:47Z
+created: 2026-09-29T17:12:33Z
+id: 17
+priority: high
+started: 2026-09-29T18:24:21Z
+status: done
+tags:
+- design
+- reconcile
+- maintainer
+title: 'Design: a healthy Comb never rolls out changed manifests or a changed spec.config'
+updated: 2026-09-30T04:35:52Z
+---
+
+Pre-release review 2026-09-29. A decision for the maintainer, not a bug against the SPEC: SPEC section 7 step 5a says "healthy? -> Running, else deploy", and the code does exactly that.
+
+Consequence: once a Comb is Running, reconcile applies nothing as long as the set of resources is the same. A new image tag in the Comb class, a changed spec.config that the manifests render from, a replica count raised in the manifest -- none of it reaches the cluster until the Comb happens to become unhealthy or the manager calls deploy itself. status.observedGeneration is recorded but never compared. The POD of reconcile names this as open.
+
+For a tool whose job is "deploys itself" this is the first thing a user will trip over.
+
+Options:
+1. Generation: deploy when metadata.generation differs from status.observedGeneration. Cheap, no new state, covers every change made through the custom resource (spec.config, spec.class). Does not cover a new release of the Comb class with the custom resource untouched.
+2. Digest: record a digest of the rendered manifests (annotation on the resources, or a status field) and deploy when it differs. Covers both. Needs a canonical serialization and one more field in the status schema.
+3. Both: generation as the trigger that costs nothing, digest for class changes.
+4. Leave it, document it prominently (README, not only the reconcile POD), and tell managers to call deploy on a change.
+
+Recommendation: 2, or 1 for the first release with 2 on the list. Either is a SPEC change (section 7, and section 6 for a status field).
+
+Maintainer decided 2026-09-29: option 2, a digest per resource. SPEC.md section 7 (flow line 5a, the 'Applied digest' bullet under Deploy details) and section 14 are edited by the orchestrator accordingly and sit uncommitted in the working tree; they belong to this card's commit. Details the orchestrator filled in within that decision, open to the maintainer's veto: annotation key <prefix>applied-digest; a digest-triggered deploy of a healthy Comb ends Pending, not Running; resources the client does not replace once they exist (PersistentVolumeClaim, running or succeeded Job) never trigger a deploy by their digest.
+
+2026-09-29 18:25 Worker started: read SPEC section 7/14, Comb.pm, fake client. Plan: digest taken in _item (after labels/namespace/apiVersion, before _restart_kept), annotation added after digest; comparison in _reconcile_local from item->{live}; PVC/Job rule mirrors ensure of the clients.
+
+2026-09-29 18:32 Tests written first (t/reconcile-digest.t, 16 subtests; t/client-fake.t +1): against the unchanged code 14 of 16 red -- green before are only the kept claim (healthy, same manifests: nothing applied) and the guard for a resource shared by same-named Combs of two namespaces. Found: a canonical JSON encoder alone is not stable -- Cpanel::JSON::XS and JSON::PP encode '4222' as a string until the scalar is used as a number, then as a number, and Comb.pm itself compares the rendered replicas numerically; so the digest is taken of a copy with every leaf stringified (booleans kept).
+
+2026-09-29 18:36 Implemented: digest in _item (sha256 of the canonical JSON of the manifest with Comb labels, namespace, apiVersion; leaves stringified; without the digest annotation itself and before _restart_kept), annotation <prefix>applied-digest via applied_digest_annotation; _reconcile_local compares on item->{live}, digest case before the record case, ends Pending. Never counted: v1 PersistentVolumeClaim, batch/v1 Job with status.succeeded or status.active (same rule as ensure of both clients). Fake client ensure learned the same rule. prove -lr t/, unit mode: 24 files, 234 tests, green; no existing test needed a change. Also found, NOT in the SPEC, decision for the maintainer: a resource rendered by same-named Combs of two namespaces (layers of one cluster) carries the digest of the one that applied last; counted literally, both Combs would deploy it back and forth every step and stay Pending. Implemented: a live resource carrying another Comb's comb-namespace label never triggers a deploy by its digest (same ownership rule as pruning). SPEC section 7 needs a sentence for it if accepted.
+
+2026-09-29 18:36 Done: deploy annotates every resource with <prefix>applied-digest, the local path of reconcile compares it and deploys a healthy Comb whose rendering changed (Pending, next step Running). Files: lib/Kubernetes/Comb.pm, lib/Kubernetes/Comb/Role/Client.pm (POD of ensure), t/lib/Kubernetes/Comb/Client/Fake.pm (ensure leaves PVC and running/succeeded Job, replaces other Jobs), t/client-fake.t, new t/reconcile-digest.t. Verified: prove -lr t/ in unit mode, 24 files, 234 tests, green, integration skipped (never run). New tests were red before (14 of 16 subtests); the PVC/Job rule and the shared-resource rule were each switched off once to see their tests fail. No existing test changed. Open for the maintainer: the rule for a resource that a same-named Comb of another namespace applied last is not in SPEC section 7; behaviour against a real cluster unverified. SPEC.md untouched by the worker, belongs to this commit.
+
+2026-09-30 04:35 Committed in 8516bc1
