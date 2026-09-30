@@ -1,0 +1,24 @@
+---
+class: standard
+completed: 2026-09-30T05:24:06Z
+created: 2026-09-30T05:21:55Z
+id: 19
+priority: high
+started: 2026-09-30T05:22:01Z
+status: done
+tags:
+- tests
+- integration
+title: 'Integration suite: fixes from its first run against a real API server'
+updated: 2026-09-30T05:24:06Z
+---
+
+First run of t/integration/comb.t on 2026-09-30, against a throwaway kwok cluster (real kube-apiserver v1.36.1, etcd, kube-controller-manager, simulated kubelet) the orchestrator created; kubeconfig in the session scratchpad, never ~/.kube/config. Result: 5 of 6 subtests green (CRD install, reconcile to Running, status/logs/restart/stop, ClusterIP -> ExternalName bridge, Upstream::K8s across two contexts of the same API server).
+
+1. 'back to local' line 187 asserts spec.type undef; the API server defaults a Service's type to ClusterIP, so it is 'ClusterIP'. The claim (a plain ClusterIP Service again) stays; the assertion must accept the defaulted value.
+2. With TEST_KUBERNETES_COMB_UPSTREAM_CONTEXT naming a context of ANOTHER API server the Upstream::K8s subtest ends Blocked ('context ... is another API server, and Comb ... publishes no external address') -- correct per SPEC section 7, but the skip message and header only say 'a context of the same kubeconfig'. Say it must reach the same API server.
+3. Not covered live: restart/stop/prune deleting a Job with propagationPolicy Background (k15). Add a Job to the integration Comb or a separate subtest, and assert its Pods are gone after stop (bounded wait, the garbage collector is asynchronous).
+
+2026-09-30 05:23 Done in t/integration/comb.t: back-to-local asserts spec.type ClusterIP + no externalName; skip message/header say the context must reach the SAME API server; new subtests 'Job and Pods deleted together by stop/restart' (own JobComb, bounded wait for GC). Verified: integration on kwok 8/8 green incl. upstream; unit prove -lr t/ 24 files/238 tests green.
+
+2026-09-30 05:24 Committed as e2dd256
