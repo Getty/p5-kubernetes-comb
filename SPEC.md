@@ -233,7 +233,7 @@ status lives only in memory.
 2. enabled?                    no → Disabled
 3. dependencies                via resolver: all healthy? no → Blocked
 4. check (hook)                class reports missing prerequisites → NeedsConfig
-5a. local                      healthy? → Running
+5a. local                      healthy and applied as rendered? → Running
                                else manifests → deploy → prune orphans
                                (diff against status.managedResources) → Pending
 5b. upstream                   upstream->status + upstream->endpoints
@@ -270,10 +270,25 @@ unreachable → `Blocked` with the reason.
   this Comb. A cluster-scoped orphan (a Namespace, a
   CustomResourceDefinition) is never deleted: it is dropped from the record,
   left in place, and the status message says so.
-- Only the *set* of resources is compared. A healthy Comb whose manifests
-  changed in content (a new image, a changed `spec.config`) is not deployed
-  again by `reconcile`; `deploy` does it on request. Whether `reconcile`
-  should detect that is open, see §14.
+- **Applied digest.** `deploy` puts an annotation on every resource
+  (`<prefix>applied-digest`) holding a digest of the manifest as the Comb
+  rendered it. `reconcile` compares it with the digest of what the Comb
+  renders now: a healthy Comb with a resource whose digest differs, or that
+  carries none, is deployed again and is `Pending` until the next step finds
+  it healthy. So a new image in the Comb class and a changed `spec.config`
+  both reach the cluster, without the manager calling `deploy`.
+  - The digest is of the rendered manifest, never of the live object: what
+    the API server defaults or a controller writes does not count as a
+    change, and neither does the restart annotation.
+  - A change made to the live object by hand is not detected; only what the
+    Comb renders is compared.
+  - A resource the client does not replace once it exists (a
+    PersistentVolumeClaim, a Job that runs or has succeeded) keeps the digest
+    it was created with and never triggers a deploy by it.
+  - A resource that a same-named Comb of another namespace applied last
+    (it carries that Comb's namespace label) never triggers a deploy by its
+    digest -- the same ownership rule as pruning. Counted, both Combs would
+    deploy it back and forth every step.
 - `status` is derived from pods: Waiting/Terminated reasons, restart counts,
   scheduling failures (`PodScheduled=False`) end up in conditions/messages.
 - `logs` falls back to the previous container on CrashLoop.
@@ -368,12 +383,15 @@ Settled by the implementation:
 - `update_status`, `patch_status` and `ensure` are in
   `Net::Async::Kubernetes` 0.009.
 
+Decided after the first implementation (2026-09-29):
+
+- `reconcile` deploys a healthy Comb again when what it renders changed,
+  told by a digest per resource (§7). `metadata.generation` against
+  `status.observedGeneration` was the alternative; it would miss a new
+  version of the Comb class with the custom resource untouched.
+
 Open:
 
-- Whether `reconcile` deploys a healthy Comb again when its manifests or
-  its `spec.config` changed (§7), and how it would tell: by
-  `metadata.generation` against `status.observedGeneration`, by a digest of
-  the rendered manifests, or both.
 - A stub selected through `spec.class` is checked against its original but
   has no `stub_of`; whether it should.
 - Deleting a Job leaves its Pods behind until the clients can send a

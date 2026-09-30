@@ -61,6 +61,14 @@ C<namespace> it lists across all namespaces.
 Create or update. Future of the object as stored. C<status> is not written
 this way -- see L</update_status>.
 
+Two kinds are not updated once they exist, as C<ensure> of
+L<Kubernetes::REST> and L<Net::Async::Kubernetes> has it: a C<v1>
+PersistentVolumeClaim is returned as it is, and so is a C<batch/v1> Job that
+runs or has succeeded (C<status.active>, C<status.succeeded>); any other
+existing Job is deleted and created anew. A Comb relies on that: what is
+left as it is never makes L<Kubernetes::Comb/reconcile> deploy by its
+digest.
+
 =method delete
 
   my $f = $client->delete('Service', 'nats', namespace => 'platform');

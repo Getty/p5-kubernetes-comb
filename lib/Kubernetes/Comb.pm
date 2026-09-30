@@ -5,10 +5,11 @@ our $VERSION = '0.001';
 use Moo;
 
 use Carp qw( croak );
+use Digest::SHA qw( sha256_hex );
 use Future;
 use Future::Utils qw( fmap_void );
 use IO::K8s;
-use JSON::MaybeXS qw( JSON );
+use JSON::MaybeXS qw( JSON is_bool );
 use Module::Runtime qw( use_module use_package_optimistically );
 use POSIX qw( strftime );
 use Scalar::Util qw( blessed );
@@ -265,7 +266,8 @@ has label_prefix => ( is => 'ro', isa => Str, default => 'comb.internal/' );
 Prefix of the label and annotation keys the Comb sets, default
 C<comb.internal/>: the name label is C<E<lt>prefixE<gt>comb>, the namespace
 label C<E<lt>prefixE<gt>comb-namespace>, the restart annotation
-C<E<lt>prefixE<gt>restartedAt>. Include the trailing C</>.
+C<E<lt>prefixE<gt>restartedAt>, the digest annotation
+C<E<lt>prefixE<gt>applied-digest>. Include the trailing C</>.
 
 =cut
 
@@ -346,6 +348,11 @@ has _memory_status => (
   isa      => Maybe[ InstanceOf['Kubernetes::Comb::CRD::CombStatus'] ],
   init_arg => undef
 );
+
+# Canonical, so the same manifest always encodes to the same bytes.
+has _digest_encoder => ( is => 'lazy', init_arg => undef );
+
+sub _build__digest_encoder { JSON->new->utf8->canonical }
 
 sub BUILD {
   my ( $self, $args ) = @_;
@@ -653,6 +660,15 @@ Pod template annotation L</restart> sets: C<E<lt>label_prefixE<gt>restartedAt>.
 
 =cut
 
+sub applied_digest_annotation { shift->label_prefix.'applied-digest' }
+
+=method applied_digest_annotation
+
+Annotation L</deploy> puts on every resource, holding the digest of the
+manifest it was applied from: C<E<lt>label_prefixE<gt>applied-digest>.
+
+=cut
+
 ####
 #### Lifecycle
 ####
@@ -713,8 +729,9 @@ L</check> reports missing prerequisites: C<NeedsConfig>.
 
 =item 5a. Local
 
-Without an upstream. L</status> healthy and C<managedResources> naming
-just what the manifests render: C<Running>, nothing applied.
+Without an upstream. L</status> healthy, every resource applied as it is
+rendered now, and C<managedResources> naming just what the manifests
+render: C<Running>, nothing applied.
 
 Not healthy: L</deploy>, then prune: every namespaced resource this Comb
 recorded in C<managedResources> that it no longer renders -- compared by
@@ -730,16 +747,37 @@ in place, which the C<Ready> message says. Then C<Pending>. A deploy that
 fails half-way is an C<Error> that records what it applied on top of the
 previous record, and prunes nothing.
 
-Healthy, but the record names other resources than the manifests render --
-one dropped from the manifests, a delete that failed, one that runs but was
-never recorded: deploy and prune all the same, and stay C<Running>, the
-C<Ready> message saying so. Everything the manifests render was live and
-healthy before. Only the set of resources is compared: a manifest whose
-content changed (a new image) is applied when the Comb is not healthy or
-its record differs, not because of that change. Whether it should force a
-re-apply too is open -- undecided design, not a bug -- and would need a way
-to detect it (an applied-digest annotation or status field, or deploying
-every step).
+Healthy, but a resource was applied from another manifest than the one
+rendered now -- a new image in the class, a changed C<spec.config> the
+manifests render from: deploy and prune all the same, then C<Pending>, the
+C<Ready> message naming the resources; the next step finds the Comb
+C<Running>, or not. The live L</applied_digest_annotation> tells, compared
+with the digest of the rendered manifest (see L</deploy>). A resource that
+carries none -- applied by a version before there was one -- counts as
+changed, which deploys the Comb once. What is compared is what the Comb
+renders, never the live object: a change made to that by hand is not
+detected, and a rolling L</restart> is no change. Two kinds of resources
+never deploy a Comb by their digest, since a deploy would not change them
+and so every step would deploy:
+
+=over
+
+=item * What the client does not replace once it exists (see
+L<Kubernetes::Comb::Role::Client/ensure>): a C<v1> PersistentVolumeClaim,
+and a C<batch/v1> Job that runs or has succeeded. They keep the digest they
+were created with. A Job that failed makes the Comb unhealthy, so it is
+deployed, which replaces the Job by what is rendered now.
+
+=item * What a same-named Comb of another namespace applied last -- it
+carries that Comb's L</comb_namespace_label>, and that Comb's digest.
+
+=back
+
+Healthy and applied as rendered, but the record names other resources than
+the manifests render -- one dropped from the manifests, a delete that
+failed, one that runs but was never recorded: deploy and prune all the
+same, and stay C<Running>, the C<Ready> message saying so. Everything the
+manifests render was live and healthy before.
 
 A workload scaled below its manifest counts as not healthy (see
 L</status>), so a reconcile after L</stop>, or after scaling a Deployment
@@ -826,7 +864,8 @@ sub deploy {
 
 Renders L</manifests>, labels every resource (and the Pod templates of
 workloads) with L</comb_labels>, puts L</namespace> on namespaced resources
-that name none, and creates or updates them one after the other. Future of
+that name none and L</applied_digest_annotation> on every one, and creates
+or updates them one after the other. Future of
 the objects as stored. A failure stops at that resource; the Future fails
 with the message, category C<deploy> and C<< { applied => [...], failed => $manifest } >>.
 Manifests that do not render fail it with category C<manifests>.
@@ -838,6 +877,17 @@ or undoing a restart under way. Deploy keeps it: the rendered Pod template
 gets the live value. It reads those workloads first, one list by
 L</comb_label> per kind (L</reconcile> passes on what it has read anyway);
 when that fails, so does the deploy -- category C<deploy>, nothing applied.
+
+The L</applied_digest_annotation> holds C<sha256:> and the SHA-256, in hex,
+of the manifest as it is applied -- what the class rendered, with the
+labels, the namespace and the C<apiVersion> deploy adds -- but for that
+annotation itself and the restart annotation carried over. It is taken of
+the canonical JSON of the manifest with every number and string as a
+string, so it does not depend on how Perl holds a value: C<replicas: 2> and
+C<replicas: "2"> digest alike. A manifest holding what is no data (a code
+reference, an object without C<TO_JSON>) does not render. L</reconcile>
+compares the digest; the bridge of a borrowing Comb carries one too, which
+nothing compares.
 
 =cut
 
@@ -1109,10 +1159,16 @@ sub _item {
   my $namespace = $object->{metadata}{namespace};
   $object->{metadata}{namespace} = $namespace = $self->namespace
     if !( defined $namespace && length $namespace ) && $self->_namespaced( $class, $object );
+  # Of the manifest as it stands here: what the class rendered plus what the
+  # Comb adds to every one. The annotation itself comes after it, and so does
+  # what deploy carries over from the live object (_restart_kept).
+  my $digest = $self->_digest_of( $object, $kind.' '.$name );
+  $object = $self->_merged_meta( $object, [], annotations => { $self->applied_digest_annotation => $digest } );
 
   return {
     manifest   => $class ? $class->FROM_HASH($object) : $object,
     data       => $object,
+    digest     => $digest,
     class      => $class,
     apiVersion => $object->{apiVersion},
     kind       => $kind,
@@ -1140,6 +1196,42 @@ sub _merged_meta {
   $meta{$field} = { %{ $meta{$field} // {} }, %$values };
   $copy{metadata} = \%meta;
   return \%copy;
+}
+
+# The digest of a manifest, as the annotation holds it. A digest the
+# manifest brings along -- rendered from a live object, say -- is left out.
+sub _digest_of {
+  my ( $self, $object, $what ) = @_;
+  my $plain = $self->_digestable( $object, $what );
+  my $meta = $plain->{metadata};
+  if ( ref $meta eq 'HASH' && ref $meta->{annotations} eq 'HASH' ) {
+    delete $meta->{annotations}{ $self->applied_digest_annotation };
+    delete $meta->{annotations} unless %{ $meta->{annotations} };
+  }
+  return 'sha256:'.sha256_hex( $self->_digest_encoder->encode($plain) );
+}
+
+# A copy of the value that encodes the same whatever Perl did to its
+# scalars: a number that was used as a string encodes as a string from then
+# on, and the other way round, and the manifest of a class is read more than
+# once. So every leaf is a string, but for undef and the JSON booleans (\1
+# and \0 too). Dies on what no manifest holds.
+sub _digestable {
+  my ( $self, $value, $what ) = @_;
+  return $value unless defined $value;
+  my $ref = ref $value;
+  return ''.$value unless $ref;
+  if ( blessed $value ) {
+    return $value ? JSON->true : JSON->false if is_bool($value);
+    croak ref($self).': manifest '.$what.' cannot be digested: it holds a '.$ref.' object'
+      unless $value->can('TO_JSON');
+    return $self->_digestable( $value->TO_JSON, $what );
+  }
+  return { map { ( $_ => $self->_digestable( $value->{$_}, $what ) ) } keys %$value } if $ref eq 'HASH';
+  return [ map { $self->_digestable( $_, $what ) } @$value ] if $ref eq 'ARRAY';
+  return $$value ? JSON->true : JSON->false
+    if $ref eq 'SCALAR' && defined $$value && $$value =~ /\A[01]\z/;
+  croak ref($self).': manifest '.$what.' cannot be digested: it holds a '.$ref.' reference';
 }
 
 # The spec the item renders, {} when it has none.
@@ -2073,6 +2165,8 @@ sub _reconcile_local {
         sub {
           my ( $live ) = @_;
           return $self->_deploy_and_prune( $r, $live, @items ) if !$live->{healthy} || $borrowed;
+          my @changed = $self->_changed_items(@items);
+          return $self->_deploy_changed( $r, \@changed, @items ) if @changed;
           return $self->_settle_record( $r, @items ) if $self->_record_differs( $r, @items );
           $r->{established} = 'local';
           return $self->_finish( $r, Running => Healthy => 'healthy' );
@@ -2100,9 +2194,63 @@ sub _record_differs {
   return grep( { !$recorded{$_} } keys %rendered ) ? 1 : 0;
 }
 
+# The items whose live object was applied from another manifest than the
+# one rendered now, or from one without a digest.
+sub _changed_items {
+  my ( $self, @items ) = @_;
+  return grep {
+    $self->_digest_counts($_) && ( $self->_live_digest($_) // '' ) ne $_->{digest}
+  } @items;
+}
+
+sub _live_digest {
+  my ( $self, $item ) = @_;
+  my $annotations = $item->{live}->metadata->annotations;
+  return ref $annotations eq 'HASH' ? $annotations->{ $self->applied_digest_annotation } : undef;
+}
+
+# Whether the digest of the live object says what this Comb applied. Not
+# where another deploy would not change it, or reconcile would deploy every
+# step: what the client leaves as it is, and what a same-named Comb of
+# another namespace applied last (see _fetch_live) -- its labels, and so its
+# digest, are that Comb's.
+sub _digest_counts {
+  my ( $self, $item ) = @_;
+  my $live = $item->{live} or return 0;
+  my $owner = ( $live->metadata->labels // {} )->{ $self->comb_namespace_label };
+  return 0 if defined $owner && $owner ne $self->namespace;
+  return $self->_kept_by_ensure($item) ? 0 : 1;
+}
+
+# What ensure of Kubernetes::REST and Net::Async::Kubernetes returns as it
+# found it: a core/v1 PersistentVolumeClaim, and a batch/v1 Job that runs or
+# has succeeded. Any other Job it replaces. By the exact apiVersion, as they
+# tell.
+sub _kept_by_ensure {
+  my ( $self, $item ) = @_;
+  my $resource = $item->{apiVersion}.'/'.$item->{kind};
+  return 1 if $resource eq 'v1/PersistentVolumeClaim';
+  return 0 unless $resource eq 'batch/v1/Job';
+  my $status = $item->{live}->TO_JSON->{status};
+  return ref $status eq 'HASH' && ( $status->{succeeded} || $status->{active} ) ? 1 : 0;
+}
+
+# A healthy Comb that renders something else than it applied: deploy and
+# prune. What is live and healthy is what was rendered before, so whether
+# the Comb is Running is for the next step to see.
+sub _deploy_changed {
+  my ( $self, $r, $changed, @items ) = @_;
+  my ( @differ, @without );
+  push @{ defined $self->_live_digest($_) ? \@differ : \@without }, $_->{kind}.' '.$_->{name} for @$changed;
+  return $self->_deploy_pending( $r, join( '; ',
+    ( @differ  ? 'rendered differently now: '.join( ', ', @differ )   : () ),
+    ( @without ? 'applied without a digest: '.join( ', ', @without ) : () )
+  ), @items );
+}
+
 # A healthy Comb whose record differs: deploy and prune all the same, so
 # the debt is paid while it runs. Everything rendered was live and healthy
-# before, so it stays Running.
+# before, and applied as rendered, so it stays Running.
 sub _settle_record {
   my ( $self, $r, @items ) = @_;
   return $self->_apply_and_prune( $r, sub {
@@ -2145,9 +2293,15 @@ sub _deploy_and_prune {
   my ( $self, $r, $live, @items ) = @_;
   my $state = $live->{healthy} ? 'in place of the bridge'
             : 'not healthy yet'.( $live->{phase} ne 'NotDeployed' && $live->{message} ? ' ('.$live->{message}.')' : '' );
+  return $self->_deploy_pending( $r, $state, @items );
+}
+
+# Deploy and prune, then Pending, the message saying why it deployed.
+sub _deploy_pending {
+  my ( $self, $r, $why, @items ) = @_;
   return $self->_apply_and_prune( $r, sub {
     $r->{established} = 'local';
-    $self->_finish( $r, Pending => Deployed => join '; ', 'applied '.scalar(@items).' resource(s), '.$state, @_ );
+    $self->_finish( $r, Pending => Deployed => join '; ', 'applied '.scalar(@items).' resource(s), '.$why, @_ );
   }, @items );
 }
 

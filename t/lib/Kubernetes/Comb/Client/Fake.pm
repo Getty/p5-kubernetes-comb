@@ -42,7 +42,11 @@ What it models of the API server: objects are stored and handed out as
 copies; every write sets a new C<metadata.resourceVersion>; C<status> is
 written only through C<update_status>/C<patch_status> -- C<ensure>,
 C<update> and C<patch> keep the stored status, the way the server treats a
-resource with a status subresource; C<list> filters by namespace and
+resource with a status subresource; C<ensure> leaves an existing core/v1
+PersistentVolumeClaim and a batch/v1 Job that runs or has succeeded
+(C<status.active>, C<status.succeeded>) as they are, and replaces any other
+Job by a new one without a status, as C<ensure> of L<Kubernetes::REST> and
+L<Net::Async::Kubernetes> does; C<list> filters by namespace and
 equality/existence label selectors. C<patch> and C<patch_status> apply a
 JSON merge patch (also for the C<strategic> type); C<json> patches are not
 supported.
@@ -354,7 +358,13 @@ sub _do_ensure {
   my $object = $self->_object($given);
   my ( $meta ) = $self->_meta( ensure => $object );
   my $existing = $self->_bucket( ref $object )->{ $meta->namespace // '' }{ $meta->name };
-  return $self->_write( $object, $existing );
+  return $self->_write( $object, $existing ) unless $existing;
+  my $resource = $object->api_version.'/'.$object->kind;
+  return $self->_copy($existing) if $resource eq 'v1/PersistentVolumeClaim';
+  return $self->_write( $object, $existing ) unless $resource eq 'batch/v1/Job';
+  my $status = $existing->TO_JSON->{status} || {};
+  return $self->_copy($existing) if $status->{succeeded} || $status->{active};
+  return $self->_write( $object, undef );   # deleted and created: a new Job
 }
 
 sub _do_update {

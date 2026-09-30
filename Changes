@@ -21,7 +21,10 @@ Revision history for Kubernetes-Comb
  - reconcile resolves upstreams, checks dependencies and the contract
    check, deploys and prunes only what the Comb owns, and writes status --
    it never fails itself, turning any error into phase Error instead; a
-   status message never carries Perl's own " at FILE line N.".
+   status message never carries Perl's own " at FILE line N.". deploy
+   stamps every resource with a <prefix>applied-digest annotation, and
+   reconcile deploys a healthy Comb again (phase Pending, then Running)
+   when what it renders no longer matches the live digests.
  - Upstreams and the bridge: Kubernetes::Comb::Role::Upstream,
    Upstream::Static (fixed endpoints) and Upstream::K8s (a peer Comb in
    another kube context) let a Comb borrow its service instead of running

@@ -133,6 +133,49 @@ subtest 'ensure' => sub {
     'an object without a name fails';
 };
 
+subtest 'ensure leaves what the real clients leave' => sub {
+  my $claim = sub { {
+    apiVersion => 'v1',
+    kind       => 'PersistentVolumeClaim',
+    metadata   => { name => 'data', namespace => 'platform', annotations => { applied => $_[0] } },
+    spec       => { accessModes => [ 'ReadWriteOnce' ], resources => { requests => { storage => $_[0] } } }
+  } };
+  my $job = sub { {
+    apiVersion => 'batch/v1',
+    kind       => 'Job',
+    metadata   => { name => 'migrate', namespace => 'platform' },
+    spec       => { template => { spec => {
+      restartPolicy => 'Never',
+      containers    => [ { name => 'migrate', image => $_[0] } ]
+    } } },
+    ( $_[1] ? ( status => $_[1] ) : () )
+  } };
+  my $image = sub { $_[0]->object( 'Job', 'migrate', namespace => 'platform' )->spec->template->spec->containers->[0]->image };
+
+  my $k8s = fake();
+  my $created = $k8s->ensure( $claim->('1Gi') )->get;
+  my $again = $k8s->ensure( $claim->('2Gi') )->get;
+  is $again->metadata->annotations->{applied}, '1Gi', 'an existing PersistentVolumeClaim is returned as it is';
+  is $again->metadata->resourceVersion, $created->metadata->resourceVersion, 'and not written';
+  is $k8s->object( 'PersistentVolumeClaim', 'data', namespace => 'platform' )->metadata->annotations->{applied},
+    '1Gi', 'stored as it was';
+
+  for my $kept ( [ 'runs' => { active => 1 } ], [ 'has succeeded' => { succeeded => 1 } ] ) {
+    my ( $what, $status ) = @$kept;
+    $k8s = fake( objects => [ $job->( 'img', $status ) ] );
+    $k8s->ensure( $job->('img:2') )->get;
+    is $image->($k8s), 'img', 'a Job that '.$what.' is left as it is';
+  }
+
+  for my $replaced ( [ 'failed' => { failed => 3 } ], [ 'has no status yet' => undef ] ) {
+    my ( $what, $status ) = @$replaced;
+    $k8s = fake( objects => [ $job->( 'img', $status ) ] );
+    my $new = $k8s->ensure( $job->('img:2') )->get;
+    is $image->($k8s), 'img:2', 'a Job that '.$what.' is replaced';
+    ok !$new->status, '... and starts without a status';
+  }
+};
+
 subtest 'update and patch keep the status' => sub {
   my $k8s = fake( objects => [ comb_cr( phase => 'Running' ) ] );
   my $cr = $k8s->object( 'Comb', 'nats', namespace => 'platform' );
