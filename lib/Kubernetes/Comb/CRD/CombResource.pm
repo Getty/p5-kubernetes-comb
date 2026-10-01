@@ -1,6 +1,6 @@
 package Kubernetes::Comb::CRD::CombResource;
 # ABSTRACT: Identity of one Kubernetes object a Comb manages
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use IO::K8s::Resource;
 

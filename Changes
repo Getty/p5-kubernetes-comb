@@ -1,5 +1,7 @@
 Revision history for Kubernetes-Comb
 
+{{$NEXT}}
+
 0.001     2026-10-01 03:50:33Z
 
  - First release. A Comb is a self-contained "micro collection of

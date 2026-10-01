@@ -1,6 +1,6 @@
 package Kubernetes::Comb::Upstream::K8s;
 # ABSTRACT: Borrow a Comb's service from its peer Comb in another kube context
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Moo;
 with 'Kubernetes::Comb::Role::Upstream';

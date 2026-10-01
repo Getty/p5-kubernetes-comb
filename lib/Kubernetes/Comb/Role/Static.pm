@@ -1,6 +1,6 @@
 package Kubernetes::Comb::Role::Static;
 # ABSTRACT: Comb manifests loaded from .pk8s and YAML files
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Moo::Role;
 

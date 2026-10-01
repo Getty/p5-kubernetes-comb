@@ -1,6 +1,6 @@
 package Kubernetes::Comb::Endpoint;
 # ABSTRACT: Value object for an endpoint a Comb offers
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Moo;
 use Carp qw( croak );

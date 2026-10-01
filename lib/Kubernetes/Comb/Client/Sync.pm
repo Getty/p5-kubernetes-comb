@@ -1,6 +1,6 @@
 package Kubernetes::Comb::Client::Sync;
 # ABSTRACT: Synchronous Comb client on Kubernetes::REST, returning done Futures
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Moo;
 with 'Kubernetes::Comb::Role::Client';

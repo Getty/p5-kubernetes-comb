@@ -1,6 +1,6 @@
 package Kubernetes::Comb;
 # ABSTRACT: A self-contained micro collection of Kubernetes parts as a live Perl instance
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Moo;
 

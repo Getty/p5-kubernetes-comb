@@ -1,6 +1,6 @@
 package Kubernetes::Comb::Client::Async;
 # ABSTRACT: Asynchronous Comb client on Net::Async::Kubernetes
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Moo;
 with 'Kubernetes::Comb::Role::Client';

@@ -1,6 +1,6 @@
 package Kubernetes::Comb::CRD::CombCondition;
 # ABSTRACT: One condition in the status of a Comb custom resource
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use IO::K8s::Resource;
 

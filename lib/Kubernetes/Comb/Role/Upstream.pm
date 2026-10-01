@@ -1,6 +1,6 @@
 package Kubernetes::Comb::Role::Upstream;
 # ABSTRACT: What a Comb borrows its service from instead of running it
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Moo::Role;
 

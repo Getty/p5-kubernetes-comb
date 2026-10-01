@@ -1,6 +1,6 @@
 package Kubernetes::Comb::CRD;
 # ABSTRACT: IO::K8s resource map provider for the Comb custom resource
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Moo;
 with 'IO::K8s::Role::ResourceMap';

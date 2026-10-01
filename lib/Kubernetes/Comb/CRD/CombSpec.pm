@@ -1,6 +1,6 @@
 package Kubernetes::Comb::CRD::CombSpec;
 # ABSTRACT: Spec of the Comb custom resource
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use IO::K8s::Resource;
 use IO::K8s::Types qw( Opaque );
