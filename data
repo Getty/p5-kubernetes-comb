@@ -1,0 +1,20 @@
+---
+class: standard
+created: 2026-10-06T19:42:50Z
+id: 22
+priority: low
+status: backlog
+tags:
+- logs
+- review-2026-10-06
+title: logs() skips init containers, so a Pod stuck in Init:CrashLoopBackOff shows
+  no useful log
+updated: 2026-10-06T19:42:50Z
+---
+
+`_log_streams` (lib/Kubernetes/Comb.pm:1592-1608) builds its list from `spec.containers` and `status.containerStatuses` only. For a Pod whose init container crashes, every main container is still waiting, so `logs` returns one `(no log: ... container "x" in pod "y" is waiting to start: PodInitializing)` line per container and never asks for the init container - the one log that explains why the Comb is not Running. `_workload_problem`/`_pod_state` already report the state, so the phase says something is wrong but `logs` cannot say what.
+
+Done when: `spec.initContainers` with `status.initContainerStatuses` are included (at least those not terminated with exit 0; `previous => 1` for CrashLoopBackOff as for main containers), labelled e.g. `pod/init:name`, with a case in t/comb-ops.t.
+
+---
+Fleet review 2026-10-06 · kind: improvement · confidence: verified
