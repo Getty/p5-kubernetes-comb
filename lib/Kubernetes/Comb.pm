@@ -982,7 +982,9 @@ sub logs {
 
 Future of the last C<lines> (default 100) log lines of every container of the
 Comb's Pods. With more than one container, each gets a C<==E<gt> pod/container
-E<lt>==> header. A container in C<CrashLoopBackOff> shows its previous
+E<lt>==> header. Init containers that have not completed successfully are
+included, labelled C<pod/init:name>, so a Pod stuck in an init container
+shows why. A container in C<CrashLoopBackOff> shows its previous
 instance, marked C<(previous)>. A container whose log cannot be read shows why
 instead of failing the whole Future.
 
@@ -1593,18 +1595,27 @@ sub _log_streams {
   my ( $self, $pod ) = @_;
   my $data = $pod->TO_JSON;
   my $name = $data->{metadata}{name};
-  my %status = map { ( $_->{name} => $_ ) } @{ $data->{status}{containerStatuses} // [] };
+  my %status = map { ( $_->{name} => $_ ) }
+    @{ $data->{status}{containerStatuses} // [] }, @{ $data->{status}{initContainerStatuses} // [] };
   my @containers = map { $_->{name} } @{ $data->{spec}{containers} // [] };
-  return map {
-    my $waiting  = $status{$_} && $status{$_}{state} ? $status{$_}{state}{waiting} : undef;
-    my $previous = $waiting && ( $waiting->{reason} // '' ) eq 'CrashLoopBackOff' ? 1 : 0;
-    +{
-      pod       => $name,
-      container => $_,
-      previous  => $previous,
-      label     => $name.( @containers > 1 ? '/'.$_ : '' ).( $previous ? ' (previous)' : '' )
-    };
-  } @containers;
+  my @init = grep {
+    my $terminated = $status{$_} && $status{$_}{state} ? $status{$_}{state}{terminated} : undef;
+    !( $terminated && !$terminated->{exitCode} )
+  } map { $_->{name} } @{ $data->{spec}{initContainers} // [] };
+  return ( map { $self->_log_stream( $name, $_, $status{$_}, $_, @containers > 1 || @init ) } @containers ),
+    map { $self->_log_stream( $name, $_, $status{$_}, 'init:'.$_, 1 ) } @init;
+}
+
+sub _log_stream {
+  my ( $self, $pod, $container, $status, $label, $qualify ) = @_;
+  my $waiting  = $status && $status->{state} ? $status->{state}{waiting} : undef;
+  my $previous = $waiting && ( $waiting->{reason} // '' ) eq 'CrashLoopBackOff' ? 1 : 0;
+  return +{
+    pod       => $pod,
+    container => $container,
+    previous  => $previous,
+    label     => $pod.( $qualify ? '/'.$label : '' ).( $previous ? ' (previous)' : '' )
+  };
 }
 
 sub _log_text {
