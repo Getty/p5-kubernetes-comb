@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-10-25T02:37:40Z
+claimed_by: offen-2610
+class: standard
+completed: 2026-10-25T02:37:40Z
+created: 2026-10-01T05:11:52Z
+id: 21
+priority: medium
+started: 2026-10-25T02:28:47Z
+status: done
+tags:
+- api
+- citiai
+title: 'Öffentliche API für geplante Ressourcen: rendered_resources / plan (für --yes-Gate
+  beim Prune)'
+updated: 2026-10-25T02:37:40Z
+---
+
+CitiAI (P4, Comb-Netz) braucht vor reconcile die Antwort "was würde dieser Comb anlegen/ändern/prunen", um Löschungen hinter --yes zu legen. Heute geht das nur über private _render/_previous_resources/_resource_key (0.001). Vorschlag: öffentliche Methode rendered_resources (gerenderte Objekte inkl. Labels) und plan (create/update/delete gegen managedResources im Status), Future-basiert wie der Rest. Quelle: citiai-core docs/superpowers/plans/2026-10-01-p3-comb-basis.md (Fable-Review, 2026-10-01).
+
+2026-10-25 02:35 Umgesetzt (nicht committet, Karte bleibt in-progress). Entscheidungen: (1) rendered_resources = Future der Manifest-Objekte (gelabelt, Namespace, Digest-Annotation) aus gemeinsamem _planned_items (resolve upstream -> _render bzw. Bridge-Items aus _observe_upstream); Upstream-Stop wird failed Future. (2) plan = {create,update,delete}, Eintraege im managedResources-Format (apiVersion,kind,namespace?,name). create = gerendert und nicht live (_fetch_live, Comb-Name-Label); update = _changed_items (Digest live != gerendert, exakt reconciles Test fuer gesunde Combs); delete = _orphans(previous, desired) ohne cluster-scoped (reconcile laesst die stehen). _orphans ist neu extrahiert und wird von _apply_and_prune geteilt. (3) Fehler: failed Future statt Error-Status -- plan/rendered_resources sind Fragen, keine Schritte; die never-dies-Regel gilt fuer reconcile. (4) Bewusst nicht modelliert: enabled/depends_on/check-Gates, Label-Pruefung vor delete (reconcile liest dafuer live), Unhealthy-Comb deployt alles. Tests t/plan.t (7 Subtests) + volle Suite 25 Dateien/245 Tests offline gruen; gegen altes lib rot nur mit Can't locate object method (unvermeidbar, Methode neu); Konsistenz plan<->reconcile geprueft (nach reconcile leer, gepruntes in delete, update nach Manifest-Aenderung). Also found: nichts Blockierendes. POD inline (=method), pod-writer sollte pruefen. In Comb.pm steht POD vor sub (wie bei reconcile).
+
+commit 54519c6
+
+Also found: rendered_resources/plan ignore enabled/depends_on/check (plan shows what a deploy would do, not what reconcile does for a disabled/blocked Comb); delete may list orphans without Comb labels that reconcile would skip; for an unhealthy Comb reconcile deploys everything rendered, plan shows only create/update of it
