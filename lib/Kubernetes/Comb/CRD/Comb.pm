@@ -1,6 +1,6 @@
 package Kubernetes::Comb::CRD::Comb;
 # ABSTRACT: The Comb custom resource
-our $VERSION = '0.002';
+our $VERSION = '0.003';
 
 use IO::K8s::APIObject
   api_version     => 'comb.internal/v1',

@@ -1,5 +1,7 @@
 Revision history for Kubernetes-Comb
 
+{{$NEXT}}
+
 0.002     2026-10-31 00:27:26Z
 
  - New public methods rendered_resources and plan: what reconcile would

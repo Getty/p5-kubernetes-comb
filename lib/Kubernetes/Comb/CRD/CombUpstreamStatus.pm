@@ -1,6 +1,6 @@
 package Kubernetes::Comb::CRD::CombUpstreamStatus;
 # ABSTRACT: Upstream section in the status of a Comb custom resource
-our $VERSION = '0.002';
+our $VERSION = '0.003';
 
 use IO::K8s::Resource;
 

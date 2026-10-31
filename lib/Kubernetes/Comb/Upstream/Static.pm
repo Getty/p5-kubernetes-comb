@@ -1,6 +1,6 @@
 package Kubernetes::Comb::Upstream::Static;
 # ABSTRACT: An upstream with fixed endpoints and no cluster behind it
-our $VERSION = '0.002';
+our $VERSION = '0.003';
 
 use Moo;
 with 'Kubernetes::Comb::Role::Upstream';

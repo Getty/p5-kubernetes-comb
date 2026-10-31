@@ -1,6 +1,6 @@
 package Kubernetes::Comb::Role::Client;
 # ABSTRACT: The Kubernetes client surface a Comb works through
-our $VERSION = '0.002';
+our $VERSION = '0.003';
 
 use Moo::Role;
 
