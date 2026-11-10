@@ -25,9 +25,7 @@
       "kanban-issues-karr-ticket@karr",
       "kanban-issues-karr-coordination@karr",
       "perl-kubernetes-rest@kubernetes-rest",
-      "perl-io-k8s-kubernetes-classes@io-k8s-p5",
-      "getty-perl-release-author-getty@karr",
-      "getty-perl-pod@karr"
+      "perl-io-k8s-kubernetes-classes@io-k8s-p5"
     ],
     "bundles": [
       "getty-cpan-dist@getty"
