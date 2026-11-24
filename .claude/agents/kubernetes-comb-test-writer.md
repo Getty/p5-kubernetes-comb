@@ -2,13 +2,12 @@
 name: kubernetes-comb-test-writer
 description: "Write Kubernetes::Comb tests against the fake client in t/lib/ (records ensure calls, returns canned pods/CRs) and Upstream::Static — reconcile transitions, pruning, upstream chains, bridge, stub contract check. Unit tests must never need a cluster. Use for test additions, regression scaffolding, and building out the t/lib/ harness."
 model: sonnet
-briefing:
-  skills:
-    - kubernetes-comb-core
-    - getty-perl-core
-    - getty-perl-moo
-    - perl-io-async-future
-    - kanban-issues-karr-ticket
+skills:
+  - kubernetes-comb-core
+  - getty-perl-core
+  - getty-perl-moo
+  - perl-io-async-future
+  - kanban-issues-karr-ticket
 ---
 
 You are the kubernetes-comb-test-writer for **Kubernetes::Comb**.

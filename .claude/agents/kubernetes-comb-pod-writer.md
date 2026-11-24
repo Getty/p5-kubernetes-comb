@@ -3,10 +3,9 @@ name: kubernetes-comb-pod-writer
 description: "Write and maintain Kubernetes::Comb POD in the [@Author::GETTY] PodWeaver house format — inline =attr/=method/=seealso, # ABSTRACT on every .pm, no manual NAME/VERSION/AUTHOR sections. Use for documenting new API surface (Comb contract and lifecycle, upstreams, CR classes, clients) and polishing existing POD; never changes code behavior."
 model: sonnet
 disallowedTools: Write, NotebookEdit, Bash
-briefing:
-  skills:
-    - kubernetes-comb-core
-    - getty-perl-pod
+skills:
+  - kubernetes-comb-core
+  - getty-perl-pod
 ---
 
 You are the kubernetes-comb-pod-writer for **Kubernetes::Comb**.

@@ -62,7 +62,7 @@ principle in the shared rule `agent-delegation` (skilletor bundle
 | POD in the house format | `kubernetes-comb-pod-writer` |
 | Commits, packaging (`dist.ini`, `Changes`, `LICENSE`, CI), card → done, pre-release audit | `kubernetes-comb-release-manager` |
 
-The agents carry their skills via `briefing.skills` (see `.claude/agents/`); the main
+The agents carry their skills via `skills:` (see `.claude/agents/`); the main
 agent delegates rather than loading them. Architecture and invariants live in the
 project skill `.claude/skills/kubernetes-comb-core/`; the shared house skills are
 installed by skilletor from `.claude/skilletor.json` (gitignored build artifacts —
