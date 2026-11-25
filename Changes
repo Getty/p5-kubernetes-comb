@@ -4,7 +4,8 @@ Revision history for Kubernetes-Comb
 
  - Requires IO::K8s 1.112 and Kubernetes::REST 1.111. IO::K8s 1.109
    sent the CRD schema bounds minimum, maximum and multipleOf as JSON
-   strings, which the API server refuses.
+   strings, which the API server refuses. Recommends
+   Net::Async::Kubernetes 0.013.
 
 0.002     2026-10-31 00:27:26Z
 
